@@ -17,7 +17,8 @@ test('coordinates snap to the nearest same-parity cell, including map edges', ()
   assert.deepEqual(snapCell(265, 449), { x: 265, y: 449 });
   assert.deepEqual(snapCell(264, 447.8), { x: 264, y: 448 });
   assert.deepEqual(snapCell(0, 1023), { x: 0, y: 1022 });
-  assert.deepEqual(snapCell(900, -10), { x: 511, y: 1 });
+  assert.deepEqual(snapCell(900, -10), { x: 510, y: 0 });
+  assert.deepEqual(snapCell(265, 448), { x: 264, y: 448 });
   for (let x = 0; x < 12; x += 0.3) {
     const cell = snapCell(x, x * 2.7);
     assert.ok(validCell(cell.x, cell.y));
@@ -75,6 +76,8 @@ test('territory uses south-anchor offsets, clips wasteland and returns all overl
   placeObject(state, facility('f2', 'fortress', 224, 452, { guildId: 'g2' }));
   assert.deepEqual(territoryGuilds(state, 220, 452), ['g1', 'g2']);
   assert.deepEqual(territoryGuilds(state, 224, 506), []);
+  placeObject(state, { id: 'mount', type: 'mountain', size: 2, x: 220, y: 454 });
+  assert.deepEqual(territoryGuilds(state, 220, 454), []);
   const edge = fixture();
   placeObject(edge, facility('f', 'fortress', 256, 462));
   assert.deepEqual(territoryGuilds(edge, 256, 470), ['g1']);

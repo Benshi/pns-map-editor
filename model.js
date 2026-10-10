@@ -21,7 +21,7 @@ export function snapCell(x, y) {
   const cy = Math.max(0, Math.min(1023, y));
   let best;
   let distance = Infinity;
-  for (const px of [Math.floor(cx), Math.ceil(cx)]) {
+  for (const px of [Math.floor(cx) - 1, Math.floor(cx), Math.ceil(cx), Math.ceil(cx) + 1]) {
     for (const py of [Math.floor(cy) - 1, Math.floor(cy), Math.ceil(cy), Math.ceil(cy) + 1]) {
       const d = (px - cx) ** 2 + (py - cy) ** 2;
       if (validCell(px, py) && d < distance) {
@@ -70,6 +70,7 @@ export function objectAt(state, x, y) {
 
 export function territoryGuilds(state, x, y) {
   if (!validCell(x, y) || terrain(x, y) !== 'grass') return [];
+  if (state.mountains.some(object => footprint(object).some(cell => cell.x === x && cell.y === y))) return [];
   return state.facilities.filter(object => object.type === 'fortress' &&
     Math.abs(object.x - x) <= 12 && Math.abs(object.y - y) <= 12).map(object => object.guildId);
 }
