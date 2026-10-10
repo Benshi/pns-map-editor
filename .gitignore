@@ -11,6 +11,12 @@
 *.sln.docstates
 *.env
 
+# Deployment secrets and live data
+/pns-map-private/
+/server/config.php
+google-client.json
+client_secret_*.json
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
