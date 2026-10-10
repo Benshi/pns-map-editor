@@ -108,3 +108,25 @@ test('JSON sharing round-trips and rejects invalid data without changing current
   assert.throws(() => importMap({ ...state, ownGuildId: 'missing' }), /自ギルド/);
   assert.equal(state.facilities[1].x, 270);
 });
+
+test('large mountain maps import and placement cannot exceed restorable limits', () => {
+  const state = emptyMap();
+  for (let x = 2; x <= 98; x += 4) {
+    for (let y = 2; y <= 1022; y += 4) {
+      state.mountains.push({ id: `mount-${x}-${y}`, type: 'mountain', size: 2, x, y });
+    }
+  }
+  for (let x = 102; state.mountains.length < 10000; x += 4) {
+    for (let y = 2; y <= 1022 && state.mountains.length < 10000; y += 4) {
+      state.mountains.push({ id: `mount-${x}-${y}`, type: 'mountain', size: 2, x, y });
+    }
+  }
+  assert.deepEqual(importMap(state), state);
+  assert.throws(() => placeObject(state, { id: 'extra', type: 'mountain', size: 2, x: 400, y: 400 }), /上限/);
+  placeObject(state, { ...state.mountains[0], x: 400, y: 400 }, state.mountains[0].id);
+  assert.equal(importMap(state).mountains.length, 10000);
+  const overlapping = structuredClone(state);
+  overlapping.mountains[1].x = overlapping.mountains[0].x;
+  overlapping.mountains[1].y = overlapping.mountains[0].y;
+  assert.throws(() => importMap(overlapping), /重な/);
+});

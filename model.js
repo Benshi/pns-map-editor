@@ -75,7 +75,7 @@ export function territoryGuilds(state, x, y) {
     Math.abs(object.x - x) <= 12 && Math.abs(object.y - y) <= 12).map(object => object.guildId);
 }
 
-export function placementError(state, object, ignoreId = null) {
+export function placementError(state, object, ignoreId = null, index = null) {
   if (object.type !== 'mountain' && !Object.hasOwn(TYPES, object.type)) return '施設の種類が不正です。';
   if (object.size !== 2) return 'この施設のサイズは 2×2 です。';
   const cells = footprint(object);
@@ -87,16 +87,21 @@ export function placementError(state, object, ignoreId = null) {
     return '実験基地外囲には山岳を配置できません。';
   }
   const occupied = new Set(cells.map(cellKey));
-  if ([...state.facilities, ...state.mountains].some(other => other.id !== ignoreId &&
-      footprint(other).some(cell => occupied.has(cellKey(cell))))) return '他の施設または山岳と重なっています。';
+  const overlaps = index ? cells.some(cell => index.occupied.has(cellKey(cell))) :
+    [...state.facilities, ...state.mountains].some(other => other.id !== ignoreId &&
+      footprint(other).some(cell => occupied.has(cellKey(cell))));
+  if (overlaps) return '他の施設または山岳と重なっています。';
   if (object.type === 'mountain') return null;
   const guild = state.guilds.find(g => g.id === object.guildId);
   if (!guild) return 'ギルドを選択してください。';
   if (object.type === 'shelter') {
     if (!guild.members.some(member => member.id === object.memberId)) return '所属メンバーを選択してください。';
-    if (state.facilities.some(other => other.id !== ignoreId && other.type === 'shelter' &&
-        other.guildId === object.guildId && other.memberId === object.memberId)) return 'このメンバーの避難所は配置済みです。';
-  } else if (state.facilities.some(other => other.id !== ignoreId &&
+    const duplicate = index ? index.unique.has(JSON.stringify([object.guildId, object.type, object.memberId])) :
+      state.facilities.some(other => other.id !== ignoreId && other.type === 'shelter' &&
+        other.guildId === object.guildId && other.memberId === object.memberId);
+    if (duplicate) return 'このメンバーの避難所は配置済みです。';
+  } else if (index ? index.unique.has(JSON.stringify([object.guildId, object.type, null])) :
+    state.facilities.some(other => other.id !== ignoreId &&
       other.guildId === object.guildId && other.type === object.type)) {
     return 'この施設は各ギルドに一つだけ配置できます。';
   }
@@ -128,9 +133,11 @@ export function addMember(state, guildId, id, name) {
 }
 
 export function placeObject(state, object, ignoreId = null) {
+  const target = object.type === 'mountain' ? state.mountains : state.facilities;
+  const limit = object.type === 'mountain' ? 10000 : 10500;
+  if (ignoreId === null && target.length >= limit) throw new Error('配置件数が上限を超えています。');
   const error = placementError(state, object, ignoreId);
   if (error) throw new Error(error);
-  const target = object.type === 'mountain' ? state.mountains : state.facilities;
   if (ignoreId !== null) {
     const index = target.findIndex(o => o.id === ignoreId);
     if (index < 0) throw new Error('移動対象が見つかりません。');
@@ -163,6 +170,7 @@ export function importMap(raw) {
   if (raw.ownGuildId !== null && !result.guilds.some(g => g.id === raw.ownGuildId)) throw new Error('自ギルドが不正です。');
   if (result.guilds.length && raw.ownGuildId === null) throw new Error('自ギルドを指定してください。');
   result.ownGuildId = raw.ownGuildId;
+  const index = { occupied: new Set(), unique: new Set() };
   for (const [list, mountain] of [[raw.mountains, true], [raw.facilities, false]]) {
     for (const source of list) {
       if (!source || (mountain ? source.type !== 'mountain' : !Object.hasOwn(TYPES, source.type))) {
@@ -171,7 +179,11 @@ export function importMap(raw) {
       const object = { id: id(source.id), type: source.type, size: source.size, x: source.x, y: source.y };
       if (!mountain) object.guildId = source.guildId;
       if (source.type === 'shelter') object.memberId = source.memberId;
-      placeObject(result, object);
+      const error = placementError(result, object, null, index);
+      if (error) throw new Error(error);
+      for (const cell of footprint(object)) index.occupied.add(cellKey(cell));
+      if (!mountain) index.unique.add(JSON.stringify([object.guildId, object.type, object.memberId ?? null]));
+      (mountain ? result.mountains : result.facilities).push(object);
     }
   }
   return result;
