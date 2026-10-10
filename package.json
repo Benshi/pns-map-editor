@@ -1,0 +1,13 @@
+{
+  "name": "pns-map-editor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Puzzle & Survival guild map editor",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check model.js && node --check app.js && node --check sw.js",
+    "start": "python3 -m http.server 8080"
+  }
+}
