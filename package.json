@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test",
-    "check": "node --check model.js && node --check app.js && node --check sw.js",
+    "check": "node --check model.js && node --check app.js && node --check persistence.js && node --check sw.js",
     "start": "python3 -m http.server 8080"
   }
 }
