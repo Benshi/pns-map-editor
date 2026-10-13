@@ -79,6 +79,7 @@ try {
     ];
     expect(file_put_contents($path, json_encode($legacy, JSON_THROW_ON_ERROR)) !== false, 'Legacy fixture failed.');
     $admin = registerIdentity($directory, $identity);
+    expect($admin['registered_at'] === null, 'Invented a registration date for a legacy user.');
     $users = readUsers($path);
     expect($admin['admin'] && $admin['display_name'] === null && !canEdit($admin),
         'Legacy administrator migration failed.');
@@ -89,10 +90,26 @@ try {
     expect(count(readUsers($directory . DIRECTORY_SEPARATOR . 'users.json')) === 2, 'Duplicate identity.');
     $stranger = ['sub' => '345678', 'name' => 'Survivor'];
     $other = registerIdentity($directory, $stranger);
+    expect(is_string($other['registered_at'])
+        && preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/D', $other['registered_at']) === 1,
+        'New user registration date was not recorded in UTC.');
+    $registeredAt = $other['registered_at'];
+    $existing = $other;
+    unset($existing['registered_at']);
+    expect(normalizeUsers([$existing])[0]['registered_at'] === null,
+        'Invented a date for an existing user without the new field.');
+    expect(registerIdentity($directory, $stranger)['registered_at'] === $registeredAt,
+        'Registration date changed on login.');
+    foreach ([123, '', 'yesterday', '2026-02-30T00:00:00Z', '2026-10-14T25:00:00Z'] as $invalidDate) {
+        $invalidUsers = readUsers($path);
+        $invalidUsers[0]['registered_at'] = $invalidDate;
+        rejects(static fn() => normalizeUsers($invalidUsers), 'Invalid registration date was accepted.');
+    }
     expect(!$other['admin'] && !canEdit($other), 'New user got administrator/edit access.');
     saveDisplayName($directory, $admin['id'], 'Survivor');
     saveDisplayName($directory, $other['id'], 'Survivor');
     $other = registerIdentity($directory, $stranger);
+    expect($other['registered_at'] === $registeredAt, 'Name change removed the registration date.');
     expect(canEdit($other) && $other['display_name'] === 'Survivor', 'Duplicate names were rejected.');
     foreach (['', ' ', "bad\nname", str_repeat('a', 81), "\xff"] as $bad) {
         rejects(static fn() => saveDisplayName($directory, $other['id'], $bad), 'Invalid name accepted.');
@@ -105,6 +122,8 @@ try {
     rejects(static fn() => suspendUser($directory, $admin['id'], $admin['id'], true, $config),
         'Administrator suspended themselves.');
     suspendUser($directory, $admin['id'], $other['id'], true, $config);
+    expect(registerIdentity($directory, $stranger)['registered_at'] === $registeredAt,
+        'Suspension removed the registration date.');
     saveDisplayName($directory, $other['id'], 'Renamed');
     expect(!canEdit(registerIdentity($directory, $stranger)), 'Rename/login bypassed suspension.');
     suspendUser($directory, $admin['id'], $other['id'], false, $config);

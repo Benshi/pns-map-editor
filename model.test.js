@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EditHistory } from './persistence.js';
 import { emptyMap, addGuild, addMember, snapCell, validCell, footprint, terrain,
   objectAt, placeObject, placementError, territoryGuilds, importMap,
   addMembers, renameMember, renameGuild, orderedMembers, setMemberRank, setMemberRanks, territorySources,
-  territoryContains, territoryBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
-  TYPES, WASTELAND, BASE, TURRETS, parseMapView, initialMapView } from './model.js';
+  territoryContains, territoryBoundary, cellBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
+  TYPES, WASTELAND, BASE, TURRETS, parseMapView, initialMapView, membersFor,
+  changeMembership, objectGuildId, deleteGuild } from './model.js';
 
 test('map outline is one closed jagged boundary around the valid parity grid', () => {
   const outlines = mapOutline();
@@ -101,21 +103,21 @@ test('bulk registration is atomic and rename preserves shelter identity and coor
   const state = fixture();
   let n = 0;
   addMembers(state, 'g1', 'One\r\nTwo\n\nThree', () => `bulk-${++n}`);
-  assert.equal(state.guilds[0].members.length, 4);
+  assert.equal(state.players.length, 4);
   addMembers(state, 'g1', 'Planned', () => `bulk-${++n}`, null);
-  assert.equal(state.guilds[0].members.at(-1).rank ?? null, null);
+  assert.equal(state.players.at(-1).rank ?? null, null);
   assert.deepEqual(addMembers(state, 'g1', 'Four\nOne\nFour\nプレイヤー', () => `bulk-${++n}`, 4),
     { added: 1, skipped: 3 });
-  assert.equal(state.guilds[0].members.at(-1).rank, 4);
+  assert.equal(state.players.at(-1).rank, 4);
   const before = structuredClone(state);
   assert.throws(() => addMembers(state, 'g1', `Five\n${'x'.repeat(81)}`, () => `bulk-${++n}`), /80/);
   assert.deepEqual(state, before);
-  placeObject(state, facility('s', 'shelter', 270, 450, { memberId: 'm1' }));
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'm1' }));
   renameMember(state, 'g1', 'm1', 'Renamed');
   renameGuild(state, 'g1', 'ABC');
-  assert.equal(state.facilities[0].memberId, 'm1');
+  assert.equal(state.facilities[0].playerId, 'm1');
   assert.equal(state.facilities[0].x, 270);
-  assert.equal(importMap(state).guilds[0].members[0].name, 'Renamed');
+  assert.equal(importMap(state).players[0].name, 'Renamed');
   assert.throws(() => renameMember(state, 'g1', 'm1', 'One'), /同じ/);
 });
 
@@ -127,7 +129,7 @@ test('bulk duplicates preserve IDs, ranks and ordering, including a full guild',
   const before = structuredClone(state);
   assert.deepEqual(addMembers(state, 'g1', ' A \nB\nプレイヤー', id, 5), { added: 0, skipped: 3 });
   assert.deepEqual(state, before);
-  assert.deepEqual(state.guilds[0].members.map(m => m.name), ['プレイヤー', 'B', 'A']);
+  assert.deepEqual(state.players.map(m => m.name), ['プレイヤー', 'B', 'A']);
   assert.throws(() => addMembers(state, 'g1', 'C', id, 6), /ランク/);
   assert.throws(() => addMembers(state, 'missing', 'C', id), /ギルド/);
   assert.throws(() => addMembers(state, 'g1', ' \n ', id), /1行/);
@@ -135,8 +137,8 @@ test('bulk duplicates preserve IDs, ranks and ordering, including a full guild',
   const full = structuredClone(state);
   assert.deepEqual(addMembers(state, 'g1', 'B\nB', id, 4), { added: 0, skipped: 2 });
   assert.deepEqual(addMembers(state, 'g1', 'B\nC\nD', id, 4), { added: 2, skipped: 1 });
-  assert.equal(state.guilds[0].members.length, 102);
-  assert.deepEqual(state.guilds[0].members.slice(0, 100), full.guilds[0].members);
+  assert.equal(state.players.length, 102);
+  assert.deepEqual(state.players.slice(0, 100), full.players);
   assert.deepEqual(importMap(state), state);
 });
 
@@ -144,13 +146,13 @@ test('batch rank changes are atomic, allow multiple R5 members and preserve plac
   const state = fixture();
   addMember(state, 'g1', 'a', 'A', 3);
   addMember(state, 'g1', 'b', 'B', 4);
-  placeObject(state, facility('s', 'shelter', 270, 450, { memberId: 'a' }));
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'a' }));
   const facilities = structuredClone(state.facilities);
-  const ids = state.guilds[0].members.map(member => member.id);
+  const ids = state.players.map(member => member.id);
   assert.equal(setMemberRanks(state, 'g1', ['a', 'b', 'a'], 5), 2);
-  assert.equal(state.guilds[0].members.filter(member => member.rank === 5).length, 2);
+  assert.equal(state.players.filter(member => member.rank === 5).length, 2);
   assert.deepEqual(state.facilities, facilities);
-  assert.deepEqual(state.guilds[0].members.map(member => member.id), ids);
+  assert.deepEqual(state.players.map(member => member.id), ids);
   assert.deepEqual(importMap(state), state);
   const before = structuredClone(state);
   for (const [guildId, selectedIds, rank] of [
@@ -160,7 +162,7 @@ test('batch rank changes are atomic, allow multiple R5 members and preserve plac
     assert.deepEqual(state, before);
   }
   assert.equal(setMemberRanks(state, 'g1', ['a', 'b'], null), 2);
-  assert.equal(state.guilds[0].members.some(member => Object.hasOwn(member, 'rank')), false);
+  assert.equal(state.players.some(member => Object.hasOwn(member, 'rank')), false);
   assert.deepEqual(state.facilities, facilities);
 });
 
@@ -169,18 +171,18 @@ test('rank edits round-trip without relocating shelters and rank groups retain i
   addMember(state, 'g1', 'b', 'B', 3);
   addMember(state, 'g1', 'a', 'A', 3);
   addMember(state, 'g1', 'leader', 'Leader', 5);
-  placeObject(state, facility('s', 'shelter', 270, 450, { memberId: 'b' }));
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'b' }));
   const shelter = structuredClone(state.facilities[0]);
   setMemberRank(state, 'g1', 'b', 4);
-  assert.deepEqual(orderedMembers(state.guilds[0].members).map(m => m.id), ['leader', 'b', 'a', 'm1']);
+  assert.deepEqual(orderedMembers(state.players).map(m => m.id), ['leader', 'b', 'a', 'm1']);
   assert.deepEqual(importMap(state), state);
   assert.deepEqual(state.facilities[0], shelter);
   setMemberRank(state, 'g1', 'b', 3);
-  assert.deepEqual(orderedMembers(state.guilds[0].members).map(m => m.id), ['leader', 'b', 'a', 'm1']);
+  assert.deepEqual(orderedMembers(state.players).map(m => m.id), ['leader', 'b', 'a', 'm1']);
   setMemberRank(state, 'g1', 'b', null);
-  assert.equal(Object.hasOwn(state.guilds[0].members[1], 'rank'), false);
+  assert.equal(Object.hasOwn(state.players[1], 'rank'), false);
   const bad = structuredClone(state);
-  bad.guilds[0].members[0].rank = '3';
+  bad.players[0].rank = '3';
   assert.throws(() => importMap(bad), /ランク/);
 });
 
@@ -243,7 +245,7 @@ function fixture() {
   return state;
 }
 const facility = (id, type, x = 264, y = 448, extra = {}) =>
-  ({ id, type, x, y, size: 2, guildId: 'g1', ...extra });
+  ({ id, type, x, y, size: 2, ...(type === 'shelter' ? {} : { guildId: 'g1' }), ...extra });
 
 test('coordinates snap to the nearest same-parity cell, including map edges', () => {
   assert.equal(validCell(1, 2), false);
@@ -279,10 +281,43 @@ test('terrain includes polygon boundaries and limits non-grass placement to wast
   assert.equal(terrain(264, 448), 'grass');
   assert.match(placementError(fixture(), facility('f', 'fortress', 256, 512)), /緑地/);
   assert.match(placementError(fixture(), facility('f', 'fortress', 256, 472)), /緑地/);
-  assert.match(placementError(fixture(), { id: 'mount', type: 'mountain', size: 2, x: 246, y: 508 }), /荒地/);
-  assert.equal(placementError(fixture(), facility('s', 'shelter', 246, 508, { memberId: 'm1' })), null);
-  assert.match(placementError(fixture(), facility('s', 'shelter', 245, 515, { memberId: 'm1' })), /実験基地外囲/);
+  assert.match(placementError(fixture(), { id: 'mount', type: 'mountain', size: 2, x: 246, y: 508 }), /緑地/);
+  assert.equal(placementError(fixture(), facility('s', 'shelter', 246, 508, { playerId: 'm1' })), null);
+  assert.match(placementError(fixture(), facility('s', 'shelter', 245, 515, { playerId: 'm1' })), /実験基地外囲/);
   assert.match(placementError(fixture(), facility('f', 'fortress', 0, 0)), /マップ内/);
+});
+
+test('mountains retain their anchor but occupy only non-wasteland cells and restore on relocation', () => {
+  const state = fixture();
+  const mountain = { id: 'clipped', type: 'mountain', size: 2, x: 254, y: 474 };
+  assert.deepEqual(footprint(mountain), [{ x: 253, y: 473 }, { x: 254, y: 472 }]);
+  assert.equal(placementError(state, mountain), null);
+  placeObject(state, mountain);
+  assert.equal(objectAt(state, 253, 473).id, 'clipped');
+  assert.equal(objectAt(state, 254, 474), undefined);
+  assert.equal(objectAt(state, 255, 473), undefined);
+  assert.deepEqual(importMap(JSON.parse(JSON.stringify(state))).mountains, state.mountains);
+  assert.equal(placementError(state, facility('s', 'shelter', 256, 474, { playerId: 'm1' })), null);
+  const restored = { ...mountain, x: 280, y: 440 };
+  placeObject(state, facility('occupied', 'hospital', 280, 440));
+  assert.match(placementError(state, restored, mountain.id), /重な/);
+  assert.equal(state.mountains[0].x, 254);
+  state.facilities = [];
+  placeObject(state, restored, mountain.id);
+  assert.equal(footprint(state.mountains[0]).length, 4);
+  assert.equal(state.mountains[0].id, mountain.id);
+  assert.match(placementError(state, { ...mountain, x: 256, y: 512 }), /実験基地外囲/);
+});
+
+test('cell boundaries exclude internal edges for one, two and three connected mountain cells', () => {
+  const cells = [{ x: 254, y: 472 }, { x: 253, y: 473 }, { x: 255, y: 473 }];
+  for (let count = 1; count <= 3; count++) {
+    const boundary = cellBoundary(cells.slice(0, count));
+    assert.equal(boundary.length, 2 * count + 2);
+    for (const [, end] of boundary) {
+      assert.equal(boundary.filter(([start]) => start[0] === end[0] && start[1] === end[1]).length, 1);
+    }
+  }
 });
 
 test('overlaps, mountains, singleton facilities and member shelters are enforced', () => {
@@ -292,9 +327,9 @@ test('overlaps, mountains, singleton facilities and member shelters are enforced
   assert.throws(() => placeObject(state, facility('f2', 'fortress', 280, 440)), /一つ/);
   placeObject(state, facility('r', 'resource', 280, 440));
   assert.throws(() => placeObject(state, facility('r2', 'resource', 290, 440)), /一つ/);
-  placeObject(state, facility('s', 'shelter', 270, 450, { memberId: 'm1' }));
-  assert.throws(() => placeObject(state, facility('s2', 'shelter', 276, 450, { memberId: 'm1' })), /配置済み/);
-  assert.throws(() => placeObject(state, facility('s3', 'shelter', 276, 450, { memberId: 'other' })), /メンバー/);
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'm1' }));
+  assert.throws(() => placeObject(state, facility('s2', 'shelter', 276, 450, { playerId: 'm1' })), /配置済み/);
+  assert.throws(() => placeObject(state, facility('s3', 'shelter', 276, 450, { playerId: 'other' })), /プレイヤー/);
   placeObject(state, { id: 'mount', type: 'mountain', size: 2, x: 290, y: 460 });
   assert.throws(() => placeObject(state, facility('w', 'warehouse', 291, 461)), /重な/);
   placeObject(state, facility('f', 'fortress', 266, 448), 'f');
@@ -352,14 +387,14 @@ test('member counts may exceed game limits while names and duplicates remain val
   for (let i = 2; i <= 100; i++) addMember(state, 'g1', `m${i}`, `P${i}`);
   addMember(state, 'g1', 'm101', 'P101', 5);
   addMember(state, 'g1', 'm102', 'P102', 5);
-  assert.equal(state.guilds[0].members.length, 102);
+  assert.equal(state.players.length, 102);
   assert.deepEqual(importMap(state), state);
 });
 
 test('JSON sharing round-trips and rejects invalid data without changing current state', () => {
   const state = fixture();
   placeObject(state, facility('f', 'fortress'));
-  placeObject(state, facility('s', 'shelter', 270, 450, { memberId: 'm1' }));
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'm1' }));
   assert.deepEqual(importMap(JSON.parse(JSON.stringify(state))), state);
   const bad = structuredClone(state);
   bad.facilities[1].x = 264;
@@ -371,6 +406,88 @@ test('JSON sharing round-trips and rejects invalid data without changing current
   assert.throws(() => importMap(bad), /種類/);
   assert.throws(() => importMap({ ...state, ownGuildId: 'missing' }), /自ギルド/);
   assert.equal(state.facilities[1].x, 270);
+});
+
+test('legacy guild members migrate to independent players without losing IDs, rank or shelters', () => {
+  const legacy = { version: 1, ownGuildId: 'g', guilds: [
+    { id: 'g', name: 'ABC', members: [{ id: 'p', name: 'Player', rank: 4 }] },
+  ], facilities: [{ id: 's', type: 'shelter', guildId: 'g', memberId: 'p', size: 2, x: 220, y: 452 }], mountains: [] };
+  const migrated = importMap(legacy);
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(migrated.players, [{ id: 'p', name: 'Player', guildId: 'g', rank: 4 }]);
+  assert.deepEqual(migrated.guilds, [{ id: 'g', name: 'ABC' }]);
+  assert.deepEqual(migrated.facilities, [{ id: 's', type: 'shelter', playerId: 'p', size: 2, x: 220, y: 452 }]);
+  assert.deepEqual(importMap(migrated), migrated);
+  assert.equal(legacy.version, 1);
+  legacy.facilities[0].guildId = 'missing';
+  assert.throws(() => importMap(legacy), /所属メンバー/);
+});
+
+test('joining, transferring, leaving and deleting guilds preserve player and shelter identity', () => {
+  const state = fixture();
+  addGuild(state, 'g2', 'OTH');
+  placeObject(state, facility('s', 'shelter', 270, 450, { playerId: 'm1' }));
+  const shelter = structuredClone(state.facilities[0]);
+  setMemberRank(state, 'g1', 'm1', 5);
+  changeMembership(state, 'm1', 'g2', 3);
+  assert.equal(membersFor(state, 'g1').length, 0);
+  assert.equal(membersFor(state, 'g2')[0].rank, 3);
+  assert.equal(objectGuildId(state, shelter), 'g2');
+  assert.deepEqual(state.facilities[0], shelter);
+  changeMembership(state, 'm1', null);
+  assert.equal(state.players[0].guildId, null);
+  assert.equal(Object.hasOwn(state.players[0], 'rank'), false);
+  assert.equal(objectGuildId(state, shelter), null);
+  assert.deepEqual(importMap({ ...state, ownGuildId: null }).players, state.players);
+  assert.match(placementError(state, { ...shelter, id: 'duplicate', x: 280 }), /配置済み/);
+  changeMembership(state, 'm1', 'g1', 4);
+  placeObject(state, facility('f', 'fortress', 214, 452));
+  deleteGuild(state, 'g1');
+  assert.equal(state.players[0].guildId, null);
+  assert.deepEqual(state.facilities, [shelter]);
+  assert.deepEqual(importMap(state), state);
+});
+
+test('unaffiliated registration and invalid membership changes are atomic', () => {
+  const state = emptyMap();
+  let count = 0;
+  addMembers(state, null, 'Solo\nOther', () => `p${++count}`, null);
+  placeObject(state, { id: 's', type: 'shelter', playerId: 'p1', size: 2, x: 220, y: 452 });
+  assert.deepEqual(importMap(state), state);
+  renameMember(state, null, 'p1', 'Renamed');
+  addGuild(state, 'g', 'ABC');
+  addMember(state, 'g', 'p3', 'Renamed', 3);
+  const before = structuredClone(state);
+  for (const operation of [
+    () => changeMembership(state, 'p1', 'missing'),
+    () => changeMembership(state, 'missing', 'g'),
+    () => changeMembership(state, 'p1', null, 3),
+    () => changeMembership(state, 'p1', 'g'),
+    () => changeMembership(state, 'p3', null),
+    () => setMemberRanks(state, null, ['p1'], 3),
+    () => addMembers(state, null, 'Valid\n' + 'x'.repeat(81), () => `p${++count}`),
+    () => deleteGuild(state, 'g'),
+  ]) {
+    assert.throws(operation);
+    assert.deepEqual(state, before);
+  }
+  const bad = structuredClone(state);
+  bad.players[0].guildId = 'missing';
+  assert.throws(() => importMap(bad), /ギルド/);
+  bad.players[0].guildId = null;
+  bad.players[0].rank = 3;
+  assert.throws(() => importMap(bad), /未所属/);
+  bad.players[0].rank = null;
+  bad.players[1].id = bad.players[0].id;
+  assert.throws(() => importMap(bad), /ID/);
+  const history = new EditHistory(state);
+  history.record(state);
+  changeMembership(state, 'p2', 'g', 4);
+  const changed = structuredClone(state);
+  assert.equal(history.dirty(state), true);
+  const undone = history.undo(state);
+  assert.deepEqual(undone, before);
+  assert.deepEqual(history.redo(undone), changed);
 });
 
 test('large mountain maps import and placement cannot exceed restorable limits', () => {

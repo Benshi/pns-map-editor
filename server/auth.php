@@ -214,13 +214,17 @@ function normalizeUsers(array $users): array
             || isset($ids[$user['id']]) || !array_key_exists('display_name', $user)
             || ($user['display_name'] !== null && (!is_string($user['display_name'])
                 || displayName($user['display_name']) !== $user['display_name']))
-            || !is_bool($user['admin'] ?? null) || !is_bool($user['suspended'] ?? null)) {
+            || !is_bool($user['admin'] ?? null) || !is_bool($user['suspended'] ?? null)
+            || (isset($user['registered_at']) && (!is_string($user['registered_at'])
+                || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/D', $user['registered_at'])
+                || (DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s\Z', $user['registered_at'],
+                    new DateTimeZone('UTC')) ?: null)?->format('Y-m-d\TH:i:s\Z') !== $user['registered_at']))) {
             throw new RuntimeException('Invalid users registry.');
         }
         $ids[$user['id']] = true;
         $result[] = ['sub' => $user['sub'], 'id' => $user['id'],
             'display_name' => $user['display_name'], 'admin' => $user['admin'],
-            'suspended' => $user['suspended']];
+            'suspended' => $user['suspended'], 'registered_at' => $user['registered_at'] ?? null];
     }
     return $result;
 }
@@ -309,7 +313,8 @@ function registerIdentity(string $private, array $identity): array
         }
         $ids = array_fill_keys(array_column($users, 'id'), true);
         $users[] = ['sub' => $identity['sub'], 'id' => newUserId($ids),
-            'display_name' => null, 'admin' => false, 'suspended' => false];
+            'display_name' => null, 'admin' => false, 'suspended' => false,
+            'registered_at' => gmdate('Y-m-d\TH:i:s\Z')];
         return $users;
     });
     foreach ($users as $user) {

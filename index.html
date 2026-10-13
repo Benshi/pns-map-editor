@@ -33,6 +33,7 @@
           <button id="guild-manage" type="button">ギルド管理</button>
           <span id="guild-member-count" aria-live="polite"></span>
         </div>
+        <button id="member-manage" type="button">プレイヤー管理</button>
       </section>
       <section id="map-console" data-console-category="mountain">
         <div class="category-tabs" role="group" aria-label="配置対象">
@@ -45,7 +46,6 @@
           <div class="inline-controls">
             <label class="sr-only" for="member">所属メンバー</label>
             <select id="member"></select>
-            <button id="member-manage" type="button">メンバー管理</button>
           </div>
           <p id="member-count">0 / 100</p>
         </div>
@@ -64,6 +64,7 @@
           <option value="mountain" hidden>山岳</option>
         </select></label>
         <label>マップ操作<select id="mode">
+          <option value="browse">閲覧 / ドラッグで画面移動（配置・移動なし）</option>
           <option value="select">選択施設をドラッグで移動 / 空き地は画面移動</option>
           <option value="place">クリックで配置 / ドラッグで画面移動</option>
         </select></label>
@@ -124,6 +125,9 @@
         <output id="cursor">X:214 Y:452</output>
         <button id="zoom-in" type="button" aria-label="拡大">＋</button>
         <button id="zoom-out" type="button" aria-label="縮小">−</button>
+        <output id="zoom-level" aria-label="拡大率">100%</output>
+        <output id="interaction-state" role="status"></output>
+        <button id="map-browse" type="button">選択解除・閲覧</button>
         <button id="home" type="button">自ギルドへ</button>
         <button id="map-maximize" type="button" aria-pressed="false" aria-label="全体表示" title="全体表示">
           <span>全体表示</span>
@@ -188,14 +192,20 @@
       <button class="dialog-close" type="button" data-close="guild-dialog" aria-label="ギルド管理を閉じる">×</button>
     </div>
     <form id="guild-form">
-      <label>ギルドコード（ASCII 3文字）<input id="guild-name" required minlength="3" maxlength="3" pattern="[\x21-\x7E]{3}" placeholder="ABC"></label>
+      <h3>新規ギルドの追加</h3>
+      <label>新しいギルドコード（ASCII 3文字）<input id="guild-name" required minlength="3" maxlength="3" pattern="[\x21-\x7E]{3}" placeholder="ABC" aria-describedby="guild-add-hint"></label>
+      <button type="submit">ギルドを追加</button>
+      <p id="guild-add-hint" class="hint">コードを入力して「ギルドを追加」を押してください。追加後、そのギルドのメンバーを登録できます。</p>
+    </form>
+    <section class="guild-existing-management" aria-labelledby="guild-management-target">
+      <h3 id="guild-management-target">管理対象：ギルド未選択</h3>
       <div class="guild-management-actions">
-        <button type="submit">追加</button>
         <button id="rename-guild" type="button">ギルドコードを変更</button>
         <button id="delete-guild" class="danger" type="button">選択ギルドと施設を削除</button>
       </div>
-    </form>
-    <button id="guild-members-manage" type="button" disabled>選択ギルドのメンバー管理</button>
+      <button id="guild-members-manage" type="button" disabled>選択ギルドのプレイヤー管理</button>
+      <p id="guild-pending-hint" class="hint" role="status" hidden>入力したコードはまだ追加されていません。「ギルドを追加」を押すか、入力欄を空にしてから既存ギルドを管理してください。</p>
+    </section>
     <label class="secondary-setting">ギルドの並び順
       <select id="guild-order">
         <option value="registration">登録順</option>
@@ -225,24 +235,23 @@
   </dialog>
   <dialog id="member-dialog" aria-labelledby="member-dialog-title">
     <div class="dialog-header">
-      <h2 id="member-dialog-title">メンバー管理</h2>
-      <button class="dialog-close" type="button" data-close="member-dialog" aria-label="メンバー管理を閉じる">×</button>
+      <h2 id="member-dialog-title">プレイヤー管理</h2>
+      <button class="dialog-close" type="button" data-close="member-dialog" aria-label="プレイヤー管理を閉じる">×</button>
     </div>
+    <label>所属（一覧の表示対象）<select id="member-guild"></select></label>
     <label>絞り込み<input id="member-dialog-filter" type="search" placeholder="名前の一部"></label>
     <p id="member-dialog-count" class="hint"></p>
     <div class="inline-controls">
-      <button id="member-select-visible" type="button">すべて選択</button>
+      <button id="member-select-visible" type="button">一括選択</button>
       <button id="member-clear-checks" type="button">すべて解除</button>
     </div>
     <div id="member-list" class="search-results" aria-label="登録済みメンバー"></div>
-    <section class="member-edit-area" aria-labelledby="member-edit-area-title">
-      <h3 id="member-edit-area-title">メンバーの編集・登録</h3>
-      <details class="member-management-accordion">
-        <summary>選択メンバーの管理</summary>
+    <section class="member-edit-area">
+      <section id="member-selection-actions" hidden>
         <form id="member-rank-form">
           <p id="member-rank-selection" class="hint" role="status"></p>
           <div class="member-rank-actions">
-            <label>変更先ランク<select id="member-bulk-rank">
+            <label id="member-bulk-rank-label">変更先ランク<select id="member-bulk-rank">
               <option value="">ランク未設定</option>
               <option value="5">R5（ギルドマスター）</option>
               <option value="4">R4（運営メンバー）</option>
@@ -254,11 +263,11 @@
             <button id="delete-members" class="danger" type="button" disabled>メンバー削除</button>
           </div>
         </form>
-      </details>
-      <details class="member-management-accordion">
-        <summary>メンバーの一括登録</summary>
+      </section>
+      <button id="member-register" type="button" aria-expanded="false" aria-controls="member-registration">プレイヤー登録</button>
+      <section id="member-registration" hidden>
         <form id="member-form">
-          <label>登録するランク<select id="member-add-rank">
+          <label id="member-add-rank-label">登録するランク<select id="member-add-rank">
             <option value="">ランク未設定（合流予定など）</option>
             <option value="5">R5（ギルドマスター）</option>
             <option value="4">R4（運営メンバー）</option>
@@ -267,9 +276,9 @@
             <option value="1">R1（仮登録メンバー）</option>
           </select></label>
           <label>一括登録（1行に1人）<textarea id="member-names" rows="6" required></textarea></label>
-          <button type="submit">まとめて登録</button>
+          <button type="submit">登録</button>
         </form>
-      </details>
+      </section>
     </section>
     <details>
       <summary>メンバー表（Excel用）</summary>
@@ -279,10 +288,37 @@
     </details>
     <p class="dialog-status" role="status"></p>
   </dialog>
+  <dialog id="membership-dialog" aria-labelledby="membership-title">
+    <div class="dialog-header">
+      <h2 id="membership-title">ギルドへの加盟・移籍</h2>
+      <button class="dialog-close" type="button" data-close="membership-dialog" aria-label="所属変更を閉じる">×</button>
+    </div>
+    <p id="membership-player"></p>
+    <form id="membership-form">
+      <label>変更先ギルド<select id="membership-guild" required></select></label>
+      <label>変更先ランク<select id="membership-rank">
+        <option value="">ランク未設定</option>
+        <option value="5">R5（ギルドマスター）</option>
+        <option value="4">R4（運営メンバー）</option>
+        <option value="3">R3（一般ユーザー）</option>
+        <option value="2">R2（サブアカウント）</option>
+        <option value="1">R1（仮登録メンバー）</option>
+      </select></label>
+      <p class="hint">所属だけを変更します。避難所の位置は維持されます。</p>
+      <button type="submit">所属を変更</button>
+    </form>
+    <p class="dialog-status" role="status"></p>
+  </dialog>
   <dialog id="member-name-dialog" aria-labelledby="member-name-dialog-title">
     <div class="dialog-header">
-      <h2 id="member-name-dialog-title">メンバー名の変更</h2>
-      <button class="dialog-close" type="button" data-close="member-name-dialog" aria-label="名前変更を閉じる">×</button>
+      <h2 id="member-name-dialog-title">プレイヤーの編集</h2>
+      <button class="dialog-close" type="button" data-close="member-name-dialog" aria-label="プレイヤーの編集を閉じる">×</button>
+    </div>
+    <p id="player-membership"></p>
+    <div class="inline-controls">
+      <button id="player-place" type="button">避難所を配置・表示</button>
+      <button id="player-transfer" type="button">所属を変更</button>
+      <button id="player-leave" type="button">ギルドから脱退</button>
     </div>
     <form id="member-name-form">
       <label>新しい名前<input id="member-name-input" maxlength="80" required></label>
@@ -333,6 +369,7 @@
       <button class="dialog-close" type="button" data-close="object-dialog" aria-label="施設検索を閉じる">×</button>
     </div>
     <label>名前・ギルド・座標で絞り込み<input id="object-filter" type="search" placeholder="名前の一部"></label>
+    <div id="object-type-filters" class="object-type-filters" role="group" aria-label="施設の種類で絞り込み"></div>
     <p id="object-count" class="hint"></p>
     <div id="object-list" class="search-results" aria-label="施設検索結果"></div>
     <button id="object-more" type="button">さらに100件表示</button>

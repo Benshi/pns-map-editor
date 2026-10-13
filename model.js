@@ -26,6 +26,40 @@ export const rankName = rank => rank == null ? 'ランク未設定' : `R${rank}`
 export function orderedMembers(members) {
   return RANKS.flatMap(rank => members.filter(member => (member.rank ?? null) === rank));
 }
+export function membersFor(state, guildId) {
+  return state.players.filter(player => player.guildId === guildId);
+}
+export function objectGuildId(state, object) {
+  return object.type === 'shelter'
+    ? state.players.find(player => player.id === object.playerId)?.guildId ?? null : object.guildId;
+}
+function validateMembership(state, guildId, rank) {
+  validateRank(rank);
+  if (guildId !== null && !state.guilds.some(guild => guild.id === guildId)) {
+    throw new Error('ギルドを選択してください。');
+  }
+  if (guildId === null && rank !== null) throw new Error('未所属プレイヤーにランクは設定できません。');
+}
+export function changeMembership(state, playerId, guildId, rank = null) {
+  validateMembership(state, guildId, rank);
+  const player = state.players.find(entry => entry.id === playerId);
+  if (!player) throw new Error('プレイヤーが見つかりません。');
+  if (membersFor(state, guildId).some(entry => entry.id !== playerId && entry.name === player.name)) {
+    throw new Error('変更先に同名のプレイヤーが存在します。名前を確認してください。');
+  }
+  player.guildId = guildId;
+  if (rank === null) delete player.rank;
+  else player.rank = rank;
+}
+export function deleteGuild(state, guildId) {
+  if (!state.guilds.some(guild => guild.id === guildId)) throw new Error('ギルドを選択してください。');
+  const next = structuredClone(state);
+  for (const player of membersFor(next, guildId)) changeMembership(next, player.id, null);
+  next.guilds = next.guilds.filter(guild => guild.id !== guildId);
+  next.facilities = next.facilities.filter(object => object.type === 'shelter' || object.guildId !== guildId);
+  if (next.ownGuildId === guildId) next.ownGuildId = next.guilds[0]?.id ?? null;
+  Object.assign(state, next);
+}
 function validateRank(rank) {
   if (!RANKS.includes(rank)) throw new Error('ランクは R5〜R1 または未設定を選択してください。');
 }
@@ -33,12 +67,10 @@ export function setMemberRank(state, guildId, memberId, rank) {
   setMemberRanks(state, guildId, [memberId], rank);
 }
 export function setMemberRanks(state, guildId, memberIds, rank) {
-  validateRank(rank);
-  const guild = state.guilds.find(g => g.id === guildId);
-  if (!guild) throw new Error('ギルドを選択してください。');
+  validateMembership(state, guildId, rank);
   const ids = new Set(memberIds);
   if (!ids.size) throw new Error('メンバーを選択してください。');
-  const members = guild.members.filter(member => ids.has(member.id));
+  const members = membersFor(state, guildId).filter(member => ids.has(member.id));
   if (members.length !== ids.size) throw new Error('選択メンバーが見つかりません。');
   for (const member of members) {
     if (rank === null) delete member.rank;
@@ -94,24 +126,22 @@ export function renameGuild(state, guildId, name) {
 }
 
 export function renameMember(state, guildId, memberId, name) {
-  const guild = state.guilds.find(g => g.id === guildId);
-  const member = guild?.members.find(m => m.id === memberId);
+  const members = membersFor(state, guildId);
+  const member = members.find(m => m.id === memberId);
   if (!member) throw new Error('メンバーを選択してください。');
   const clean = text(name, 'メンバー名');
-  if (guild.members.some(m => m.id !== memberId && m.name === clean)) throw new Error('同じメンバーが存在します。');
+  if (members.some(m => m.id !== memberId && m.name === clean)) throw new Error('同じメンバーが存在します。');
   member.name = clean;
 }
 
 export function addMembers(state, guildId, names, createId, rank = null) {
-  validateRank(rank);
+  validateMembership(state, guildId, rank);
   const next = structuredClone(state);
-  const guild = next.guilds.find(g => g.id === guildId);
-  if (!guild) throw new Error('ギルドを選択してください。');
   const lines = names.split(/\r?\n/).map(n => n.trim()).filter(Boolean);
   if (!lines.length) throw new Error('メンバー名を1行に1人ずつ入力してください。');
   let added = 0;
   let skipped = 0;
-  const known = new Set(guild.members.map(member => member.name));
+  const known = new Set(membersFor(next, guildId).map(member => member.name));
   for (const line of lines) {
     const name = text(line, 'メンバー名');
     if (known.has(name)) { skipped++; continue; }
@@ -119,7 +149,7 @@ export function addMembers(state, guildId, names, createId, rank = null) {
     known.add(name);
     added++;
   }
-  state.guilds = next.guilds;
+  state.players = next.players;
   return { added, skipped };
 }
 
@@ -190,8 +220,9 @@ export function snapCell(x, y) {
 
 export function footprint(object) {
   const { x, y } = object;
-  return object.size === 1 ? [{ x, y }] :
+  const cells = object.size === 1 ? [{ x, y }] :
     [{ x, y }, { x: x - 1, y: y - 1 }, { x, y: y - 2 }, { x: x + 1, y: y - 1 }];
+  return object.type === 'mountain' ? cells.filter(cell => terrain(cell.x, cell.y) !== 'wasteland') : cells;
 }
 
 export function inPolygon(x, y, vertices) {
@@ -213,7 +244,7 @@ export function terrain(x, y) {
 }
 
 export function emptyMap() {
-  return { version: 1, ownGuildId: null, guilds: [], facilities: [], mountains: [] };
+  return { version: 2, ownGuildId: null, guilds: [], players: [], facilities: [], mountains: [] };
 }
 
 export const cellKey = ({ x, y }) => `${x},${y}`;
@@ -248,11 +279,16 @@ export function territoryBoundary(state, source) {
       }
     }
   }
+  return cellBoundary([...cells.values()]);
+}
+
+export function cellBoundary(occupiedCells) {
+  const cells = new Set(occupiedCells.map(cellKey));
   const edges = [
     [1, -1, 0, -1, 1, 0], [1, 1, 1, 0, 0, 1],
     [-1, 1, 0, 1, -1, 0], [-1, -1, -1, 0, 0, -1],
   ];
-  return [...cells.values()].flatMap(({ x, y }) => edges
+  return occupiedCells.flatMap(({ x, y }) => edges
     .filter(([dx, dy]) => !cells.has(`${x + dx},${y + dy}`))
     .map(([, , ax, ay, bx, by]) => [[x + ax, y + ay], [x + bx, y + by]]));
 }
@@ -260,8 +296,8 @@ export function territoryBoundary(state, source) {
 export function placedFacility(state, candidate) {
   if (candidate.type === 'mountain') return null;
   return state.facilities.find(object => object.type === candidate.type
-    && object.guildId === candidate.guildId
-    && (candidate.type !== 'shelter' || object.memberId === candidate.memberId)) ?? null;
+    && (candidate.type === 'shelter' ? object.playerId === candidate.playerId
+      : object.guildId === candidate.guildId)) ?? null;
 }
 
 export function territorySources(state) {
@@ -287,7 +323,8 @@ export function placementError(state, object, ignoreId = null, index = null) {
   const size = object.type === 'mountain' ? 2 : TYPES[object.type].size;
   if (object.size !== size) return `この施設のサイズは ${size}×${size} です。`;
   const cells = footprint(object);
-  if (cells.some(cell => !validCell(cell.x, cell.y))) return '施設全体をマップ内に配置してください。';
+  if (footprint({ x: object.x, y: object.y, size: object.size }).some(cell => !validCell(cell.x, cell.y))) return '施設全体をマップ内に配置してください。';
+  if (!cells.length) return '山岳の一部は緑地に配置してください。';
   if (object.type === 'shelter' && cells.some(cell => terrain(cell.x, cell.y) === 'lab')) {
     return '避難所は実験基地外囲には配置できません。';
   }
@@ -305,14 +342,14 @@ export function placementError(state, object, ignoreId = null, index = null) {
       footprint(other).some(cell => occupied.has(cellKey(cell))));
   if (overlaps) return '他の施設または山岳と重なっています。';
   if (object.type === 'mountain') return null;
-  const guild = state.guilds.find(g => g.id === object.guildId);
-  if (!guild) return 'ギルドを選択してください。';
   if (object.type === 'shelter') {
-    if (!guild.members.some(member => member.id === object.memberId)) return '所属メンバーを選択してください。';
-    const duplicate = index ? index.unique.has(JSON.stringify([object.guildId, object.type, object.memberId])) :
+    if (!state.players.some(player => player.id === object.playerId)) return 'プレイヤーを選択してください。';
+    const duplicate = index ? index.unique.has(JSON.stringify([null, object.type, object.playerId])) :
       state.facilities.some(other => other.id !== ignoreId && other.type === 'shelter' &&
-        other.guildId === object.guildId && other.memberId === object.memberId);
+        other.playerId === object.playerId);
     if (duplicate) return 'このメンバーの避難所は配置済みです。';
+  } else if (!state.guilds.some(guild => guild.id === object.guildId)) {
+    return 'ギルドを選択してください。';
   } else if (index ? index.unique.has(JSON.stringify([object.guildId, object.type, null])) :
     state.facilities.some(other => other.id !== ignoreId &&
       other.guildId === object.guildId && other.type === object.type)) {
@@ -332,17 +369,17 @@ export function addGuild(state, id, name) {
   const cleanName = text(name, 'ギルド名');
   if (state.guilds.length >= 100) throw new Error('ギルドは最大100件です。');
   if (state.guilds.some(g => g.name === cleanName || g.id === id)) throw new Error('同じギルドが存在します。');
-  state.guilds.push({ id, name: cleanName, members: [] });
+  state.guilds.push({ id, name: cleanName });
   if (state.ownGuildId === null) state.ownGuildId = id;
 }
 
 export function addMember(state, guildId, id, name, rank = null) {
-  validateRank(rank);
-  const guild = state.guilds.find(g => g.id === guildId);
-  if (!guild) throw new Error('ギルドを選択してください。');
+  validateMembership(state, guildId, rank);
   const cleanName = text(name, 'メンバー名');
-  if (guild.members.some(m => m.name === cleanName || m.id === id)) throw new Error('同じメンバーが存在します。');
-  guild.members.push({ id, name: cleanName, ...(rank === null ? {} : { rank }) });
+  if (state.players.some(m => m.id === id || (m.guildId === guildId && m.name === cleanName))) {
+    throw new Error('同じメンバーが存在します。');
+  }
+  state.players.push({ id, name: cleanName, guildId, ...(rank === null ? {} : { rank }) });
 }
 
 export function placeObject(state, object, ignoreId = null) {
@@ -362,7 +399,7 @@ export function placeObject(state, object, ignoreId = null) {
 }
 
 export function importMap(raw) {
-  if (!raw || raw.version !== 1 || !Array.isArray(raw.guilds) ||
+  if (!raw || ![1, 2].includes(raw.version) || !Array.isArray(raw.guilds) ||
       !Array.isArray(raw.facilities) || !Array.isArray(raw.mountains)) throw new Error('対応するマップJSONではありません。');
   if (raw.guilds.length > 100 || raw.facilities.length > 11100 || raw.mountains.length > 10000) {
     throw new Error('データの件数が上限を超えています。');
@@ -377,11 +414,19 @@ export function importMap(raw) {
   };
   for (const guild of raw.guilds) {
     addGuild(result, id(guild.id), guild.name);
-    if (!Array.isArray(guild.members)) throw new Error('メンバー一覧が不正です。');
-    for (const member of guild.members) addMember(result, guild.id, id(member.id), member.name, member.rank ?? null);
+  }
+  if (raw.version === 1) {
+    for (const guild of raw.guilds) {
+      if (!Array.isArray(guild.members)) throw new Error('メンバー一覧が不正です。');
+      for (const member of guild.members) addMember(result, guild.id, id(member.id), member.name, member.rank ?? null);
+    }
+  } else {
+    if (!Array.isArray(raw.players)) throw new Error('プレイヤー一覧が不正です。');
+    for (const player of raw.players) {
+      addMember(result, player.guildId, id(player.id), player.name, player.rank ?? null);
+    }
   }
   if (raw.ownGuildId !== null && !result.guilds.some(g => g.id === raw.ownGuildId)) throw new Error('自ギルドが不正です。');
-  if (result.guilds.length && raw.ownGuildId === null) throw new Error('自ギルドを指定してください。');
   result.ownGuildId = raw.ownGuildId;
   const index = { occupied: new Set(), unique: new Set() };
   for (const [list, mountain] of [[raw.mountains, true], [raw.facilities, false]]) {
@@ -390,12 +435,17 @@ export function importMap(raw) {
         throw new Error('施設の種類が不正です。');
       }
       const object = { id: id(source.id), type: source.type, size: source.size, x: source.x, y: source.y };
-      if (!mountain) object.guildId = source.guildId;
-      if (source.type === 'shelter') object.memberId = source.memberId;
+      if (source.type === 'shelter') {
+        object.playerId = raw.version === 1 ? source.memberId : source.playerId;
+        if (raw.version === 1 && objectGuildId(result, object) !== source.guildId) {
+          throw new Error('所属メンバーが不正です。');
+        }
+      } else if (!mountain) object.guildId = source.guildId;
       const error = placementError(result, object, null, index);
       if (error) throw new Error(error);
       for (const cell of footprint(object)) index.occupied.add(cellKey(cell));
-      if (!mountain) index.unique.add(JSON.stringify([object.guildId, object.type, object.memberId ?? null]));
+      if (!mountain) index.unique.add(JSON.stringify([
+        object.type === 'shelter' ? null : object.guildId, object.type, object.playerId ?? null]));
       (mountain ? result.mountains : result.facilities).push(object);
     }
   }

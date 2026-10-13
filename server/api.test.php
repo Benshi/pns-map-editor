@@ -142,6 +142,15 @@ try {
     $seed($users[0]['id']);
     $result = $request(['session' => $session, 'route' => '/session']);
     expect(json_decode($result['html'], true)['user']['admin'], 'Administrator flag missing.');
+    $result = $request(['session' => $session]);
+    expect(str_contains($result['html'], '登録日時：'), 'Registration date label missing.');
+    expect(str_contains($result['html'], '<br>登録日時：（管理者）'), 'Unknown registration date was not blank.');
+    $users[1]['registered_at'] = '2026-10-13T16:05:52Z';
+    expect(file_put_contents($private . DIRECTORY_SEPARATOR . 'users.json',
+        json_encode($users, JSON_THROW_ON_ERROR)) !== false, 'Registration date fixture failed.');
+    $result = $request(['session' => $session]);
+    expect(str_contains($result['html'], '登録日時：2026-10-14 01:05:52（日本時間）'),
+        'Registration date was not displayed in Japan time.');
     $result = $request(['session' => $session, 'route' => '/maps']);
     expect(json_decode($result['html'], true)['servers'] === ['S1063'], 'Admin catalog failed.');
     $directory = $private . DIRECTORY_SEPARATOR . 'maps' . DIRECTORY_SEPARATOR . 'S1063';
@@ -156,9 +165,10 @@ try {
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/name',
         'post' => ['csrf' => $csrf, 'name' => 'Same Name']]);
     expect($result['status'] === 303 && !isset($result['state']['suggested_name']), 'Name registration failed.');
-    $map = ['version' => 1, 'ownGuildId' => null, 'guilds' => [], 'facilities' => [], 'mountains' => []];
+    $map = ['version' => 2, 'ownGuildId' => null, 'guilds' => [], 'players' => [], 'facilities' => [], 'mountains' => []];
+    $legacyMap = ['version' => 1, 'ownGuildId' => null, 'guilds' => [], 'facilities' => [], 'mountains' => []];
     $save = ['session' => $session, 'method' => 'POST', 'route' => '/maps/S1063',
-        'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 0, 'map' => $map])]];
+        'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 0, 'map' => $legacyMap])]];
     $result = $request($save);
     expect($result['status'] === 200 && json_decode($result['html'], true)['revision'] === 1,
         'Registered user save failed: ' . $result['status'] . ' ' . $result['html']);

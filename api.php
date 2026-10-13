@@ -346,6 +346,9 @@ try {
         foreach ($users as $user) {
             $content .= '<li>' . escape($user['display_name'] ?? '表示名未登録') . ' · '
                 . escape($user['id']);
+            $content .= '<br>登録日時：' . ($user['registered_at'] === null ? ''
+                : escape((new DateTimeImmutable($user['registered_at']))
+                    ->setTimezone(new DateTimeZone('Asia/Tokyo'))->format('Y-m-d H:i:s')) . '（日本時間）');
             if (isAdmin($user, $config)) {
                 $content .= '（管理者）';
             } else {

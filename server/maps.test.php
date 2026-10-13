@@ -39,11 +39,13 @@ $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pns-map-test-' . bin2hex(ran
 expect(mkdir($root, 0700), 'Fixture directory failed.');
 $userId = 'user-0123456789abcdef01234567';
 $users = [['sub' => '123456', 'id' => $userId, 'display_name' => 'Builder',
-    'admin' => false, 'suspended' => false]];
+    'admin' => false, 'suspended' => false, 'registered_at' => null]];
 $usersPath = $root . DIRECTORY_SEPARATOR . 'users.json';
 expect(file_put_contents($usersPath, json_encode($users, JSON_THROW_ON_ERROR)) !== false, 'Users fixture failed.');
 try {
     $map = emptySharedMap();
+    $map['version'] = 1;
+    unset($map['players']);
     $map['guilds'] = [['id' => 'g', 'name' => 'Guild', 'members' => [['id' => 'm', 'name' => 'Member']]]];
     $map['facilities'] = [
         ['id' => 'f', 'type' => 'fortress', 'guildId' => 'g', 'size' => 2, 'x' => 214, 'y' => 452],
@@ -52,7 +54,45 @@ try {
     ];
     $clean = validateSharedMap($map);
     expect($clean['ownGuildId'] === 'g' && count($clean['facilities']) === 2, 'Valid map rejected.');
-    expect(!isset($clean['guilds'][0]['members'][0]['rank']), 'Legacy rank was guessed.');
+    expect(!isset($clean['players'][0]['rank']) && $clean['version'] === 2, 'Legacy migration failed.');
+    expect($clean['facilities'][1]['playerId'] === 'm'
+        && !isset($clean['facilities'][1]['guildId']), 'Shelter ownership was not migrated.');
+    $unaffiliated = $clean;
+    $unaffiliated['players'][0]['guildId'] = null;
+    expect(validateSharedMap($unaffiliated) === $unaffiliated, 'Unaffiliated shelter was rejected.');
+    $transferred = $unaffiliated;
+    $transferred['guilds'][] = ['id' => 'other', 'name' => 'OTH'];
+    $transferred['players'][0]['guildId'] = 'other';
+    $transferred['players'][0]['rank'] = 4;
+    expect(validateSharedMap($transferred)['facilities'] === $clean['facilities'],
+        'Transfer changed shelter identity or coordinates.');
+    $bad = $unaffiliated;
+    $bad['players'][0]['rank'] = 3;
+    rejects(static fn() => validateSharedMap($bad), 'Unaffiliated player retained a guild rank.');
+    $bad = $transferred;
+    $bad['players'][0]['guildId'] = 'missing';
+    rejects(static fn() => validateSharedMap($bad), 'Missing player guild accepted.');
+    $bad = $clean;
+    $bad['facilities'][1]['playerId'] = 'missing';
+    rejects(static fn() => validateSharedMap($bad), 'Missing player shelter accepted.');
+    $bad = $clean;
+    $bad['facilities'][] = ['id' => 's2', 'type' => 'shelter', 'playerId' => 'm',
+        'size' => 2, 'x' => 230, 'y' => 452];
+    rejects(static fn() => validateSharedMap($bad), 'Duplicate player shelter accepted.');
+    $bad = $clean;
+    $bad['players'][] = ['id' => 'm2', 'name' => 'Member', 'guildId' => 'g'];
+    rejects(static fn() => validateSharedMap($bad), 'Duplicate player name accepted.');
+    $bad = $clean;
+    $bad['players'][0]['id'] = 'g';
+    rejects(static fn() => validateSharedMap($bad), 'Duplicate cross-entity ID accepted.');
+    $unaffiliatedSaved = saveSharedMap($root, 'S9998', 0, $unaffiliated, $userId);
+    expect($unaffiliatedSaved['map'] === $unaffiliated
+        && currentMap(mapDirectory($root, 'S9998'))['map'] === $unaffiliated,
+        'Unaffiliated shelter was lost on persistence.');
+    $transferSaved = saveSharedMap($root, 'S9998', 1, $transferred, $userId);
+    expect($transferSaved['map'] === $transferred, 'Transfer did not persist.');
+    $leaveRestored = saveSharedMap($root, 'S9998', 2, null, $userId, 1);
+    expect($leaveRestored['map'] === $unaffiliated, 'Unaffiliated history restore failed.');
     $southBoundary = $map;
     $southBoundary['facilities'][0]['x'] = 256;
     $southBoundary['facilities'][0]['y'] = 552;
@@ -73,6 +113,22 @@ try {
         'size' => 2, 'x' => 246, 'y' => 508];
     rejects(static fn() => validateSharedMap($wastelandMountain),
         'Mountain was allowed in wasteland.');
+    $clippedMountain = $map;
+    $clippedMountain['mountains'][] = ['id' => 'clipped', 'type' => 'mountain',
+        'size' => 2, 'x' => 254, 'y' => 474];
+    expect(validateSharedMap($clippedMountain)['mountains'][0]['y'] === 474,
+        'Clipped mountain lost its anchor.');
+    $clippedMountain['facilities'][1]['x'] = 256;
+    $clippedMountain['facilities'][1]['y'] = 474;
+    expect(count(validateSharedMap($clippedMountain)['facilities']) === 2,
+        'Removed wasteland cells remained occupied by the mountain.');
+    $clippedMountain['facilities'][1]['x'] = 253;
+    $clippedMountain['facilities'][1]['y'] = 473;
+    rejects(static fn() => validateSharedMap($clippedMountain), 'Clipped mountain overlap was accepted.');
+    $labMountain = $map;
+    $labMountain['mountains'][] = ['id' => 'lab-mountain', 'type' => 'mountain',
+        'size' => 2, 'x' => 256, 'y' => 512];
+    rejects(static fn() => validateSharedMap($labMountain), 'Lab mountain disappeared instead of being rejected.');
     $labShelter = $map;
     $labShelter['facilities'][1]['x'] = 245;
     $labShelter['facilities'][1]['y'] = 515;
@@ -89,8 +145,8 @@ try {
     }
     $expandedClean = validateSharedMap($expanded);
     expect(count($expandedClean['facilities']) === 7
-        && count($expandedClean['guilds'][0]['members']) === 102
-        && $expandedClean['guilds'][0]['members'][0]['rank'] === 4, 'Ranks/outposts did not round-trip.');
+        && count($expandedClean['players']) === 102
+        && $expandedClean['players'][0]['rank'] === 4, 'Ranks/outposts did not round-trip.');
     $bad = $expanded;
     $bad['facilities'][2]['type'] = 'outpost6';
     rejects(static fn() => validateSharedMap($bad), 'Accepted nonexistent outpost6.');
@@ -180,7 +236,7 @@ try {
         'Concurrent save did not have exactly one winner.');
     echo "Validation, privacy, server isolation, history, restore, suspension and concurrent saves: OK\n";
 } finally {
-    foreach (['S1063', 'S1047', 'S9999'] as $server) {
+    foreach (['S1063', 'S1047', 'S9999', 'S9998'] as $server) {
         $directory = $root . DIRECTORY_SEPARATOR . 'maps' . DIRECTORY_SEPARATOR . $server;
         if (is_dir($directory)) {
             foreach (new DirectoryIterator($directory) as $file) {

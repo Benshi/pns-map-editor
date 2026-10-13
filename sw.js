@@ -1,4 +1,4 @@
-const CACHE = 'pns-map-editor-v65';
+const CACHE = 'pns-map-editor-v72';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './model.js', './persistence.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', event => {

@@ -31,6 +31,7 @@ input, select, textarea { display: block; width: 100%; margin-top: .3rem; border
 #member option.member-placed, #type option.facility-placed { color: #9fb9d1; }
 #member option.member-unplaced, #type option.facility-unplaced { color: #fff0b3; }
 .compact-guild { padding-bottom: .5rem; margin-bottom: .5rem; }
+#member-manage { margin-top: .4rem; width: 100%; }
 #own-name, #member-count { margin: .3rem 0; font-size: .78rem; }
 #member-count { display: flex; flex-wrap: nowrap; align-items: baseline; justify-content: space-between; gap: .35rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .member-count-item { display: inline-flex; align-items: baseline; gap: .18rem; white-space: nowrap; }
@@ -51,7 +52,7 @@ input, select, textarea { display: block; width: 100%; margin-top: .3rem; border
 #map-console .category-tabs [aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--tab-border); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 dialog { width: min(92vw, 440px); max-height: 85dvh; overflow: auto; padding: 1rem; background: #1a2e24; color: #e9efe8; border: 1px solid #66825b; border-radius: 8px; }
-#member-dialog { position: fixed; inset: 3dvh 0 auto; max-height: 94dvh; margin: 0 auto; }
+#member-dialog, #object-dialog { position: fixed; inset: 3dvh 0 auto; max-height: 94dvh; margin: 0 auto; }
 dialog::backdrop { background: #0009; }
 .dialog-header { position: sticky; top: -1rem; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin: -1rem -1rem .7rem; padding: .5rem 1rem; background: #1a2e24; border-bottom: 1px solid #3c5143; }
 .dialog-header h2 { margin: 0; }
@@ -69,6 +70,10 @@ button.dialog-close { flex-shrink: 0; width: 2.75rem; height: 2.75rem; padding: 
 .guild-management-actions > button { margin: 0; }
 .guild-management-actions .danger { margin-left: auto; }
 #guild-members-manage { margin-top: .55rem; }
+.guild-existing-management { margin: .8rem 0 0; padding: .7rem 0 0; border-top: 1px solid #3c5143; border-bottom: 0; }
+#guild-dialog h3 { margin: .4rem 0; font-size: .9rem; color: #cde2b9; }
+#guild-add-hint, #guild-pending-hint { font-size: .75rem; }
+#guild-pending-hint { color: #ffdc81; }
 .secondary-setting { margin: .8rem 0 .4rem; color: #aebcaf; font-size: .75rem; }
 .secondary-setting select { max-width: 16rem; padding: .35rem .5rem; }
 .guild-code-change-row { display: flex; align-items: end; gap: .55rem; }
@@ -79,6 +84,16 @@ button.dialog-close { flex-shrink: 0; width: 2.75rem; height: 2.75rem; padding: 
 .dialog-actions { display: flex; justify-content: flex-end; flex-wrap: nowrap; gap: .5rem; margin-top: .8rem; }
 .dialog-actions button { margin: 0; }
 .search-results { max-height: 35dvh; overflow-y: auto; display: flex; flex-direction: column; gap: .3rem; margin-bottom: .7rem; }
+.object-type-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .3rem; }
+.object-type-filters label { display: flex; align-items: center; gap: .3rem; min-width: 0; height: 2.75rem; margin: 0; padding: .35rem; border: 1px solid #66825b; border-radius: 4px; cursor: pointer; font-size: .8rem; }
+.object-type-filters input { flex: 0 0 auto; width: 1rem; height: 1rem; margin: 0; }
+.object-type-filters label:has(:checked) { border-color: #d7ff91; background: #527342; }
+#object-list { height: 35dvh; scrollbar-gutter: stable; }
+#object-more:disabled { visibility: hidden; }
+#interaction-state { font-size: .8rem; padding: .3rem .45rem; border: 1px solid #71856b; border-radius: 4px; background: #20372a; }
+#interaction-state[data-state="place"] { background: #59431d; border-color: #e0b45c; }
+#interaction-state[data-state="selected"], #interaction-state[data-state="move"] { background: #283c50; border-color: #819bb5; }
+#zoom-level { min-width: 3.5rem; font-size: .8rem; font-variant-numeric: tabular-nums; }
 .search-results button { text-align: left; overflow-wrap: anywhere; flex-shrink: 0; }
 .search-results [aria-pressed="true"] { border-color: #d7ff91; background: #527342; }
 .search-results h3 { margin: .5rem 0 .2rem; font-size: .9rem; color: #cde2b9; }
@@ -92,17 +107,15 @@ button.dialog-close { flex-shrink: 0; width: 2.75rem; height: 2.75rem; padding: 
 .member-selected-count[hidden] { display: none; }
 .member-group-counts { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .member-rank-members { display: flex; flex-direction: column; gap: .3rem; padding: 0 0 .5rem .3rem; }
-.member-row { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr) 5.25rem; align-items: stretch; gap: .4rem; flex-shrink: 0; }
+.member-row { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); align-items: stretch; gap: .4rem; flex-shrink: 0; }
 .member-row input[type="checkbox"] { width: 1.25rem; height: 1.25rem; align-self: center; margin: 0; cursor: pointer; }
 .member-row .member-row-name { min-width: 0; text-align: left; overflow-wrap: anywhere; }
-.member-row .member-rename { width: 5.25rem; padding-inline: .25rem; font-size: .75rem; text-align: center; }
 .member-group-name { display: inline-block; min-width: 3rem; margin-right: .4rem; }
 .count-exceeded { color: #ff7777; }
 #member-list { max-height: min(42dvh, 36rem); overflow: auto; overscroll-behavior: contain; }
 #member-dialog .hint { margin: .4rem 0; }
 #member-dialog details { margin: .45rem 0; }
 #member-dialog details > summary { padding: .45rem .2rem; color: #d5e6c5; cursor: pointer; font-size: .85rem; }
-#member-dialog .member-management-accordion { border-top: 1px solid #3c5143; }
 #member-dialog #member-bulk-rank, #member-dialog #member-add-rank { width: fit-content; max-width: 100%; }
 .member-rank-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; gap: .35rem; }
 .member-rank-actions label { font-size: .78rem; }
@@ -111,8 +124,6 @@ button.dialog-close { flex-shrink: 0; width: 2.75rem; height: 2.75rem; padding: 
 .member-rank-actions button { white-space: nowrap; padding-inline: .45rem; font-size: .78rem; }
 .member-rank-actions .danger { margin-top: 0; }
 #member-dialog .member-edit-area { margin: .65rem 0; padding: .55rem .7rem; border: 1px solid #66825b; border-radius: 6px; background: #20372a; }
-#member-dialog .member-edit-area h3 { margin: 0 0 .35rem; color: #cde2b9; font-size: .85rem; }
-#member-dialog .member-edit-area details:first-of-type { border-top: 0; }
 #member-export { white-space: pre; overflow: auto; }
 #member-export-copy { margin: .35rem 0; }
 .object-result { display: flex; align-items: center; gap: .55rem; }
@@ -217,10 +228,9 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   .map-panel > .footer { display: none; }
 }
 @media (max-width: 380px) {
-  .member-row { grid-template-columns: 1.15rem minmax(0, 1fr) 4.7rem; gap: .25rem; }
-  .member-row .member-rename { width: 4.7rem; font-size: .68rem; }
+  .member-row { grid-template-columns: 1.15rem minmax(0, 1fr); gap: .25rem; }
   .member-rank-group summary { flex-wrap: wrap; gap: .15rem .4rem; }
-  #member-dialog { inset-block-start: 1dvh; max-height: 98dvh; }
+  #member-dialog, #object-dialog { inset-block-start: 1dvh; max-height: 98dvh; }
   #member-list { max-height: 36dvh; }
 }
 @media (max-width: 500px) and (max-height: 700px) {
@@ -237,7 +247,7 @@ body.map-maximized { overflow: hidden; }
 .map-maximized .map-panel { position: fixed; inset: 0; z-index: 10; height: 100dvh; min-height: 0; background: #14251d; }
 .map-maximized .map-panel > :not(.map-toolbar):not(#canvas-container) { display: none; }
 .map-maximized .map-toolbar { position: absolute; top: .5rem; right: .5rem; z-index: 1; padding: 0; }
-.map-maximized .map-toolbar > :not(#map-maximize) { display: none; }
+.map-maximized .map-toolbar > :not(#map-maximize):not(#zoom-level):not(#interaction-state):not(#map-browse) { display: none; }
 .map-maximized #map-maximize { width: 44px; height: 44px; padding: 10px; }
 .map-maximized #map-maximize span { display: none; }
 .map-maximized .map-restore-icon { display: block; }

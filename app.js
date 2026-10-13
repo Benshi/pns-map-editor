@@ -1,7 +1,8 @@
 import { TYPES, RANKS, shelterColor, rankName, orderedMembers, setMemberRanks, territorySources, territoryRadius, territoryContains, territoryGuilds,
   LAB, WASTELAND, TURRETS, emptyMap, addGuild, addMembers, renameGuild, renameMember, snapCell, validCell,
   footprint, cellKey, terrain, objectAt, placeObject, placementError, importMap, parseMapView, initialMapView,
-  territoryBoundary, placedFacility, mapOutline } from './model.js';
+  territoryBoundary, cellBoundary, placedFacility, mapOutline, membersFor, objectGuildId,
+  changeMembership, deleteGuild } from './model.js';
 import { EditHistory, sharedMap, apiRequest } from './persistence.js';
 
 const $ = id => document.getElementById(id);
@@ -42,6 +43,11 @@ let editingMemberGuildId = '';
 let deletingMemberIds = [];
 let rankSelectionGuildId = '';
 let objectResultLimit = 100;
+const searchableObjectTypes = [
+  ['fortress', '要塞'], ['outpost', '前哨'], ['shelter', '避難所'],
+  ['resource', '資源'], ['trap', '響罠'], ['warehouse', '倉庫'], ['hospital', '病院'],
+];
+const objectTypeFilters = new Set(searchableObjectTypes.map(([type]) => type));
 let drag = null;
 const touchPoints = new Map();
 let pinch = null;
@@ -49,6 +55,7 @@ let touchGesture = false;
 let longPressTimer = null;
 let longPressPointerId = null;
 let contextMember = null;
+let membershipPlayerId = '';
 let width = 0;
 let height = 0;
 let frame = null;
@@ -83,6 +90,10 @@ try {
 history.reset(state);
 
 const guild = () => state.guilds.find(g => g.id === $('guild').value);
+const managementGuildId = () => $('member-guild').value || null;
+const managementMembers = () => membersFor(state, managementGuildId());
+const shelterPlayer = object => state.players.find(player => player.id === object.playerId);
+const canPlaceShelter = () => !!state.players.find(player => player.id === $('member').value);
 const objects = () => [...state.facilities, ...state.mountains];
 const selected = () => objects().find(o => o.id === selectedId);
 const newId = () => crypto.randomUUID();
@@ -113,7 +124,7 @@ function refreshPersistence() {
   updateAccountLinks();
   const canEdit = loaded && !viewingPast && (localMode || session.user?.can_edit);
   $('map-console').hidden = !canEdit;
-  for (const id of ['save', 'undo', 'redo', 'guild-manage', 'move', 'delete']) $(id).hidden = !canEdit;
+  for (const id of ['save', 'undo', 'redo', 'guild-manage', 'member-manage', 'move', 'delete']) $(id).hidden = !canEdit;
   const dirty = history.dirty(state);
   const info = revisionInfo?.saved_at ? ` / ${new Date(revisionInfo.saved_at).toLocaleString()} / ${revisionInfo.author.display_name} · ${revisionInfo.author.id}` : '';
   const mapLabel = serverId ? `${serverId} 第${revision}版` : 'サーバー未指定';
@@ -140,17 +151,31 @@ function refreshPersistence() {
   for (const selector of ['#guild-form button[type="submit"]', '#member-form button', '#member-name-form button[type="submit"]', '#position-form button[type="submit"]']) {
     document.querySelector(selector).disabled = !editable();
   }
-  $('member-manage').disabled = !editable() || !guild();
-  $('guild-members-manage').disabled = !editable() || !guild();
-  $('rename-guild').disabled = !editable() || !state.guilds.length;
-  document.querySelector('#member-form button').disabled = !editable() || !guild();
-  document.querySelector('#member-rank-form button').disabled = !editable() || !guild() || !rankMemberIds.size;
-  $('delete-members').disabled = !editable() || !guild() || !rankMemberIds.size;
-  $('member-select-visible').disabled = !editable() || !guild();
+  $('member-manage').disabled = !editable();
+  for (const button of document.querySelectorAll('[data-category]')) {
+    button.disabled = button.dataset.category === 'facilities' ? !guild()
+      : button.dataset.category === 'shelter' && !guild() && !canPlaceShelter();
+  }
+  const pendingGuild = $('guild-name').value.length > 0;
+  $('guild-pending-hint').hidden = !pendingGuild;
+  $('guild-management-target').textContent = guild()
+    ? `管理対象：[${guild().name}]` : '管理対象：ギルド未選択';
+  $('guild-members-manage').textContent = guild()
+    ? `[${guild().name}] のプレイヤー登録・管理` : 'プレイヤー登録・管理';
+  $('guild-members-manage').disabled = !editable() || !guild() || pendingGuild;
+  $('rename-guild').disabled = !editable() || !guild() || pendingGuild;
+  document.querySelector('#member-form button').disabled = !editable();
+  document.querySelector('#member-rank-form button').disabled = !editable() || managementGuildId() === null || !rankMemberIds.size;
+  $('delete-members').disabled = !editable() || !rankMemberIds.size;
+  $('member-select-visible').disabled = !editable() || !managementMembers().length;
+  $('member-guild').disabled = !editable();
+  $('member-register').disabled = !editable();
+  document.querySelector('#membership-form button').disabled = !editable();
+  for (const id of ['player-place', 'player-transfer', 'player-leave']) $(id).disabled = !editable();
   $('member-clear-checks').disabled = !rankMemberIds.size;
   document.querySelector('#position-form button[type="submit"]').disabled = !editable()
-    || (category !== 'mountain' && (!guild() || (category === 'shelter' && !$('member').value)));
-  for (const [id, allowed] of [['delete-guild', !!guild()],
+    || (category === 'facilities' && !guild()) || (category === 'shelter' && !canPlaceShelter());
+  for (const [id, allowed] of [['delete-guild', !!guild() && !pendingGuild],
     ['move', !!selected()], ['delete', !!selected()]]) {
     $(id).disabled = !editable() || !allowed;
   }
@@ -185,10 +210,10 @@ function option(value, label) {
 
 function objectName(object) {
   if (object.type === 'mountain') return '山岳';
-  const owner = state.guilds.find(g => g.id === object.guildId);
+  const owner = state.guilds.find(g => g.id === objectGuildId(state, object));
   const name = object.type === 'shelter' ?
-    owner?.members.find(m => m.id === object.memberId)?.name : TYPES[object.type].name;
-  return `${owner?.name ?? ''} / ${name}`;
+    shelterPlayer(object)?.name : TYPES[object.type].name;
+  return `${owner?.name ?? '未所属'} / ${name}`;
 }
 
 function refresh() {
@@ -201,7 +226,7 @@ function refresh() {
   if (state.guilds.some(g => g.id === guildId)) $('guild').value = guildId;
   const current = guild();
   state.ownGuildId = current?.id ?? null;
-  $('guild-member-count').textContent = current ? `${current.members.length}人` : '';
+  $('guild-member-count').textContent = current ? `${membersFor(state, current.id).length}人` : '';
   $('guild-member-count').hidden = !current;
   const placedTypes = new Set(state.facilities.filter(object => object.guildId === current?.id)
     .map(object => object.type));
@@ -211,9 +236,12 @@ function refresh() {
     entry.className = placedTypes.has(entry.value) ? 'facility-placed' : 'facility-unplaced';
     entry.textContent = `${type.name}${type.size === 1 ? '（1×1）' : ''}${placedTypes.has(entry.value) ? '（配置済み）' : ''}`;
   }
-  if (!current && category !== 'mountain') setCategory('mountain');
+  if (!current && category !== 'mountain'
+    && !(category === 'shelter' && state.players.some(player => player.id === memberId && player.guildId === null))) {
+    setCategory('mountain');
+  }
   const shelters = memberShelters();
-  const members = current?.members ?? [];
+  const members = membersFor(state, current?.id ?? null);
   $('member').replaceChildren(option('', 'メンバー未選択'));
   for (const rank of RANKS) {
     const groupMembers = members.filter(m => (m.rank ?? null) === rank);
@@ -229,7 +257,10 @@ function refresh() {
     }));
     $('member').append(group);
   }
-  if (current?.members.some(m => m.id === memberId)) $('member').value = memberId;
+  if (members.some(m => m.id === memberId)) $('member').value = memberId;
+  const managementId = managementGuildId();
+  $('member-guild').replaceChildren(option('', '未所属'), ...orderedGuilds.map(g => option(g.id, g.name)));
+  $('member-guild').value = state.guilds.some(g => g.id === managementId) ? managementId : '';
   memberCountLine($('member-count'), members, shelters, 100);
   $('delete-guild').disabled = !current;
   if (!selected()) selectedId = '';
@@ -241,7 +272,7 @@ function refresh() {
     name.textContent = objectName(object);
     const details = document.createElement('span');
     details.className = 'selection-object-details';
-    details.textContent = ` — ${object.size === 1 ? '基準セル' : '南セル'} X:${object.x} Y:${object.y} / ${object.size}×${object.size}`;
+    details.textContent = ` — ${object.type === 'mountain' ? '基準座標' : object.size === 1 ? '基準セル' : '南セル'} X:${object.x} Y:${object.y} / ${object.size}×${object.size}${object.type === 'mountain' ? `（実占有${footprint(object).length}マス）` : ''}`;
     selection.replaceChildren(name, details);
   } else {
     selection.textContent = 'マップ上の施設をクリックして選択します。';
@@ -260,8 +291,8 @@ function refresh() {
 }
 
 function memberShelters() {
-  return new Map(state.facilities.filter(object => object.type === 'shelter'
-    && object.guildId === guild()?.id).map(object => [object.memberId, object]));
+  return new Map(state.facilities.filter(object => object.type === 'shelter')
+    .map(object => [object.playerId, object]));
 }
 function memberGroupLabel(rank, members, shelters, label = rankName(rank)) {
   const placed = members.filter(member => shelters.has(member.id)).length;
@@ -284,6 +315,7 @@ function memberCountLine(element, members, shelters, limit) {
     item.replaceChildren(caption, value);
     return item;
   });
+  $('guild-name').addEventListener('input', refreshPersistence);
   element.replaceChildren(...items);
 }
 function memberRankSelection(matches) {
@@ -291,22 +323,23 @@ function memberRankSelection(matches) {
   const hidden = [...rankMemberIds].filter(id => !visibleIds.has(id)).length;
   $('member-rank-selection').textContent = `選択中: ${rankMemberIds.size}人${hidden ? `（検索結果外 ${hidden}人を含む）` : ''}`;
   for (const badge of $('member-list').querySelectorAll('[data-rank-selected]')) {
-    const selected = guild()?.members.filter(member => String(member.rank ?? 'unset') === badge.dataset.rankSelected
-      && rankMemberIds.has(member.id)).length ?? 0;
+    const selected = managementMembers().filter(member => String(member.rank ?? 'unset') === badge.dataset.rankSelected
+      && rankMemberIds.has(member.id)).length;
     badge.textContent = `(${selected})`;
     badge.hidden = selected === 0;
   }
-  $('member-rank-form').querySelector('button[type="submit"]').disabled = !editable() || !guild() || !rankMemberIds.size;
-  $('delete-members').disabled = !editable() || !guild() || !rankMemberIds.size;
+  $('member-selection-actions').hidden = !rankMemberIds.size;
+  $('member-clear-checks').hidden = !rankMemberIds.size;
   $('member-clear-checks').disabled = !rankMemberIds.size;
   refreshPersistence();
 }
 
 function renderMemberList() {
-  const members = guild()?.members ?? [];
-  if (rankSelectionGuildId !== guild()?.id) {
+  $('member-dialog-title').textContent = 'プレイヤー管理';
+  const members = managementMembers();
+  if (rankSelectionGuildId !== managementGuildId()) {
     rankMemberIds.clear();
-    rankSelectionGuildId = guild()?.id ?? '';
+    rankSelectionGuildId = managementGuildId();
   }
   const memberIds = new Set(members.map(member => member.id));
   for (const id of rankMemberIds) {
@@ -315,10 +348,13 @@ function renderMemberList() {
   const query = $('member-dialog-filter').value.trim().toLocaleLowerCase();
   const matches = members.filter(member => member.name.toLocaleLowerCase().includes(query));
   const shelters = memberShelters();
-  memberCountLine($('member-dialog-count'), members, shelters, 100);
+  memberCountLine($('member-dialog-count'), members, shelters, managementGuildId() === null ? undefined : 100);
+  $('member-add-rank-label').hidden = managementGuildId() === null;
+  $('member-bulk-rank-label').hidden = managementGuildId() === null;
+  $('member-rank-form').querySelector('button[type="submit"]').hidden = managementGuildId() === null;
   if (query) $('member-dialog-count').append(document.createTextNode(` / 検索結果 ${matches.length}人`));
   $('member-list').replaceChildren();
-  for (const rank of RANKS) {
+  for (const rank of managementGuildId() === null ? [null] : RANKS) {
     const groupMembers = matches.filter(member => (member.rank ?? null) === rank);
     const allGroupMembers = members.filter(member => (member.rank ?? null) === rank);
     if (query && !groupMembers.length) continue;
@@ -335,8 +371,8 @@ function renderMemberList() {
     const summary = document.createElement('summary');
     const rankNameElement = document.createElement('span');
     rankNameElement.className = 'member-rank-name';
-    rankNameElement.textContent = rank === null ? '未' : rankName(rank);
-    if (rank === null) {
+    rankNameElement.textContent = managementGuildId() === null ? '未所属' : rank === null ? '未' : rankName(rank);
+    if (rank === null && managementGuildId() !== null) {
       rankNameElement.setAttribute('aria-label', 'ランク未設定');
       rankNameElement.title = 'ランク未設定';
     }
@@ -372,27 +408,8 @@ function renderMemberList() {
       memberButton.type = 'button';
       memberButton.className = 'member-row-name';
       memberButton.textContent = `${member.name} — ${shelter ? `配置済み (${shelter.x},${shelter.y})` : '未配置'}`;
-      memberButton.addEventListener('click', () => {
-        $('member-filter').value = '';
-        refresh();
-        $('member').value = member.id;
-        refreshPersistence();
-      });
-      const renameButton = document.createElement('button');
-      renameButton.type = 'button';
-      renameButton.className = 'member-rename';
-      renameButton.textContent = '名前変更';
-      renameButton.disabled = !editable();
-      renameButton.setAttribute('aria-label', `${member.name}の名前を変更`);
-      renameButton.addEventListener('click', () => {
-        editingMemberId = member.id;
-        editingMemberGuildId = guild()?.id ?? '';
-        $('member-name-input').value = member.name;
-        $('member-name-dialog').querySelector('.dialog-status').textContent = '';
-        $('member-name-dialog').showModal();
-        $('member-name-input').focus();
-      });
-      row.append(checkbox, memberButton, renameButton);
+      memberButton.addEventListener('click', () => openPlayerActions(member));
+      row.append(checkbox, memberButton);
       list.append(row);
     }
     group.append(summary, list);
@@ -411,10 +428,11 @@ function renderMemberList() {
 
 function renderObjectList() {
   const query = $('object-filter').value.trim().toLocaleLowerCase();
-  const matches = objects().filter(object =>
-    `${objectName(object)} (${object.x},${object.y})`.toLocaleLowerCase().includes(query));
+  const matches = state.facilities.filter(object =>
+    objectTypeFilters.has(object.type.startsWith('outpost') ? 'outpost' : object.type)
+    && `${objectName(object)} (${object.x},${object.y})`.toLocaleLowerCase().includes(query));
   $('object-count').textContent = `${matches.length}件中 ${Math.min(matches.length, objectResultLimit)}件表示`;
-  $('object-more').hidden = matches.length <= objectResultLimit;
+  $('object-more').disabled = matches.length <= objectResultLimit;
   $('object-list').replaceChildren(...matches.slice(0, objectResultLimit).map(object => {
     const button = document.createElement('button');
     button.type = 'button';
@@ -446,8 +464,8 @@ function coordinates() {
 function draft(cell, id = 'preview') {
   const type = $('type').value;
   const object = { id, type, size: type === 'mountain' ? 2 : TYPES[type].size, ...cell };
-  if (type !== 'mountain') object.guildId = guild()?.id;
-  if (type === 'shelter') object.memberId = $('member').value;
+  if (type === 'shelter') object.playerId = $('member').value;
+  else if (type !== 'mountain') object.guildId = guild()?.id;
   return object;
 }
 
@@ -491,7 +509,7 @@ function confirmWastelandPlacement(object) {
 
 function matchingPlacement(candidate) {
   return objects().find(object => object.type === candidate.type && object.size === candidate.size
-    && object.guildId === candidate.guildId && object.memberId === candidate.memberId
+    && object.guildId === candidate.guildId && object.playerId === candidate.playerId
     && object.x === candidate.x && object.y === candidate.y);
 }
 
@@ -509,11 +527,17 @@ $('guild-form').addEventListener('submit', event => {
 });
 $('member-form').addEventListener('submit', event => {
   event.preventDefault();
-  const rank = $('member-add-rank').value === '' ? null : Number($('member-add-rank').value);
-  const success = update(next => addMembers(next, $('guild').value, $('member-names').value, newId,
+  const rank = managementGuildId() === null || $('member-add-rank').value === '' ? null : Number($('member-add-rank').value);
+  const success = update(next => addMembers(next, managementGuildId(), $('member-names').value, newId,
     rank),
   result => `新規登録 ${result.added}人、同名スキップ ${result.skipped}人。登録済みメンバーのランク・順番は変更していません。`);
-  if (success) $('member-names').value = '';
+  if (success) {
+    $('member-names').value = '';
+    memberOpenRanks.add(String(rank ?? 'unset'));
+    $('member-registration').hidden = true;
+    $('member-register').setAttribute('aria-expanded', 'false');
+    renderMemberList();
+  }
 });
 $('member-name-form').addEventListener('submit', event => {
   event.preventDefault();
@@ -535,7 +559,7 @@ $('shelter-rank-form').addEventListener('submit', event => {
 $('member-rank-form').addEventListener('submit', event => {
   event.preventDefault();
   const rank = $('member-bulk-rank').value === '' ? null : Number($('member-bulk-rank').value);
-  update(next => setMemberRanks(next, $('guild').value, [...rankMemberIds], rank),
+  update(next => setMemberRanks(next, managementGuildId(), [...rankMemberIds], rank),
     count => `${count}人のランクを${rankName(rank)}に変更しました。名前・登録順・避難所の位置は維持しています。`);
 });
 $('rename-guild').addEventListener('click', () => {
@@ -555,20 +579,134 @@ $('guild-code-form').addEventListener('submit', event => {
   }
 });
 function openMemberManagement() {
+  if (!editable()) return status('プレイヤー管理には編集権限が必要です。', true);
+  $('member-guild').value = $('guild').value;
   rankMemberIds.clear();
   $('member-dialog-filter').value = '';
+  $('member-names').value = '';
   memberOpenRanks.clear();
-  if (guild()?.members.some(member => member.rank === 5)) memberOpenRanks.add('5');
+  const firstRank = RANKS.find(rank => managementMembers().some(member => (member.rank ?? null) === rank));
+  if (firstRank !== undefined) memberOpenRanks.add(String(firstRank ?? 'unset'));
+  $('member-registration').hidden = true;
+  $('member-register').setAttribute('aria-expanded', 'false');
   renderMemberList();
   $('member-dialog').querySelector('.dialog-status').textContent = '';
   $('member-dialog').showModal();
 }
-$('guild-members-manage').addEventListener('click', openMemberManagement);
+function openPlayerActions(player) {
+  if (!editable()) return status('プレイヤーの編集には編集権限が必要です。', true);
+  editingMemberId = player.id;
+  editingMemberGuildId = player.guildId;
+  const owner = state.guilds.find(entry => entry.id === player.guildId);
+  $('player-membership').textContent = `${player.name} — ${owner ? `[${owner.name}] ${rankName(player.rank)}` : '未所属'}`;
+  $('player-leave').hidden = player.guildId === null;
+  $('player-transfer').textContent = player.guildId === null ? 'ギルドに加盟' : '別ギルドへ移籍';
+  $('member-name-input').value = player.name;
+  $('member-name-dialog').querySelector('.dialog-status').textContent = '';
+  $('member-name-dialog').showModal();
+}
+function openMembershipDialog(player) {
+  if (!editable()) return status('所属変更には編集権限が必要です。', true);
+  const targets = state.guilds.filter(entry => entry.id !== player.guildId);
+  if (!targets.length) return status('加盟・移籍先のギルドを先に登録してください。', true);
+  membershipPlayerId = player.id;
+  $('membership-title').textContent = player.guildId === null ? 'ギルドに加盟' : '別ギルドへ移籍';
+  $('membership-player').textContent = player.name;
+  $('membership-guild').replaceChildren(option('', 'ギルドを選択'), ...targets.map(entry => option(entry.id, entry.name)));
+  $('membership-rank').value = '';
+  $('membership-dialog').querySelector('.dialog-status').textContent = '';
+  $('membership-dialog').showModal();
+}
+function leaveGuild(player) {
+  if (!editable()) return status('所属変更には編集権限が必要です。', true);
+  if (player.guildId === null) return status('このプレイヤーは既に未所属です。', true);
+  if (!window.confirm(`${player.name} をギルドから脱退させますか？ランクは解除され、避難所の位置は維持されます。`)) return;
+  if (update(next => changeMembership(next, player.id, null), '未所属に変更しました。避難所の位置は維持しています。')) {
+    $('member-name-dialog').close();
+    enterBrowseMode();
+  }
+}
+$('membership-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const rank = $('membership-rank').value === '' ? null : Number($('membership-rank').value);
+  if (update(next => changeMembership(next, membershipPlayerId, $('membership-guild').value, rank),
+    '所属を変更しました。避難所の位置は維持しています。')) {
+    $('membership-dialog').close();
+    $('member-name-dialog').close();
+    membershipPlayerId = '';
+    enterBrowseMode();
+  }
+});
+$('player-transfer').addEventListener('click', () => {
+  const player = state.players.find(entry => entry.id === editingMemberId);
+  if (player) openMembershipDialog(player);
+  else status('プレイヤーが見つかりません。', true);
+});
+$('player-leave').addEventListener('click', () => {
+  const player = state.players.find(entry => entry.id === editingMemberId);
+  if (player) leaveGuild(player);
+  else status('プレイヤーが見つかりません。', true);
+});
+$('player-place').addEventListener('click', () => {
+  const player = state.players.find(entry => entry.id === editingMemberId);
+  if (!player) return status('プレイヤーが見つかりません。', true);
+  if (!editable()) return status('避難所の配置には編集権限が必要です。', true);
+  $('member-name-dialog').close();
+  $('member-dialog').close();
+  $('guild-dialog').close();
+  $('guild').value = player.guildId ?? '';
+  $('member-filter').value = '';
+  refresh();
+  $('member').value = player.id;
+  setCategory('shelter');
+  const shelter = memberShelters().get(player.id);
+  if (shelter) {
+    selectObject(shelter, true);
+    $('mode').value = 'select';
+  } else {
+    selectedId = '';
+    prepareUnplacedPlacement(draft({ x: 0, y: 0 }));
+    refresh();
+    status(`${player.name} の避難所の配置位置を選んでください。`);
+  }
+  rememberGuild();
+});
+$('member-guild').addEventListener('change', () => {
+  if ($('member-names').value.trim()
+    && !window.confirm('入力中の登録名を破棄して、一覧の所属を切り替えますか？')) {
+    $('member-guild').value = rankSelectionGuildId ?? '';
+    return;
+  }
+  rankMemberIds.clear();
+  memberOpenRanks.clear();
+  const firstRank = RANKS.find(rank => managementMembers().some(member => (member.rank ?? null) === rank));
+  if (firstRank !== undefined) memberOpenRanks.add(String(firstRank ?? 'unset'));
+  $('member-dialog-filter').value = '';
+  $('member-registration').hidden = true;
+  $('member-register').setAttribute('aria-expanded', 'false');
+  $('member-names').value = '';
+  $('member-dialog').querySelector('.dialog-status').textContent = '';
+  renderMemberList();
+});
+$('member-register').addEventListener('click', () => {
+  $('member-registration').hidden = !$('member-registration').hidden;
+  $('member-register').setAttribute('aria-expanded', String(!$('member-registration').hidden));
+  if (!$('member-registration').hidden) $('member-names').focus();
+});
+$('guild-members-manage').addEventListener('click', () => {
+  if ($('guild-name').value.length) {
+    return status('入力したコードはまだ追加されていません。「ギルドを追加」を押してください。', true);
+  }
+  if (!guild() || !editable()) {
+    return status('編集可能なギルドを選択してください。', true);
+  }
+  openMemberManagement();
+});
 for (const kind of ['guild', 'member']) {
   $(`${kind}-manage`).addEventListener('click', () => {
     if (kind === 'guild') {
-      $('guild-name').value = guild()?.name ?? '';
       $('guild-order').value = guildOrder;
+      refreshPersistence();
     } else return openMemberManagement();
     $(`${kind}-dialog`).querySelector('.dialog-status').textContent = '';
     $(`${kind}-dialog`).showModal();
@@ -643,7 +781,7 @@ $('member').addEventListener('change', () => {
   relocationPreviewActive = false;
   refreshPersistence();
   const shelter = state.facilities.find(o => o.type === 'shelter'
-    && o.guildId === $('guild').value && o.memberId === $('member').value);
+    && o.playerId === $('member').value);
   if (shelter) {
     selectObject(shelter, true);
     $('mode').value = 'select';
@@ -660,6 +798,10 @@ $('type').addEventListener('change', () => {
   requestDraw();
 });
 $('mode').addEventListener('change', () => {
+  if ($('mode').value === 'browse') {
+    enterBrowseMode();
+    return;
+  }
   placementPreviewActive = $('mode').value === 'place';
   relocationPreviewActive = false;
   hover = null;
@@ -675,16 +817,12 @@ for (const id of ['x', 'y']) {
 }
 $('delete-guild').addEventListener('click', () => {
   const current = guild();
-  if (!current || !window.confirm(`「${current.name}」と所属メンバー・全施設を削除しますか？`)) return;
-  update(next => {
-    next.guilds = next.guilds.filter(g => g.id !== current.id);
-    next.facilities = next.facilities.filter(o => o.guildId !== current.id);
-    if (next.ownGuildId === current.id) next.ownGuildId = next.guilds[0]?.id ?? null;
-  }, 'ギルドを削除しました。');
+  if (!current || !window.confirm(`「${current.name}」とギルド施設を削除しますか？所属プレイヤーは未所属になり、避難所は残ります。`)) return;
+  update(next => deleteGuild(next, current.id), 'ギルドを削除しました。プレイヤーと避難所は維持しています。');
 });
 $('delete-members').addEventListener('click', () => {
   const selectedIds = [...rankMemberIds];
-  const members = guild()?.members.filter(member => selectedIds.includes(member.id)) ?? [];
+  const members = managementMembers().filter(member => selectedIds.includes(member.id));
   if (!members.length) return;
   deletingMemberIds = members.map(member => member.id);
   const shelters = memberShelters();
@@ -699,14 +837,14 @@ $('delete-members').addEventListener('click', () => {
   $('member-delete-dialog').showModal();
 });
 $('member-delete-confirm').addEventListener('click', () => {
-  const guildId = guild()?.id;
-  if (!guildId || !deletingMemberIds.length) return;
+  if (!deletingMemberIds.length) return;
   const ids = new Set(deletingMemberIds);
   const success = update(next => {
-    const targetGuild = next.guilds.find(entry => entry.id === guildId);
-    if (!targetGuild) throw new Error('ギルドを選択してください。');
-    targetGuild.members = targetGuild.members.filter(member => !ids.has(member.id));
-    next.facilities = next.facilities.filter(object => object.guildId !== guildId || !ids.has(object.memberId));
+    if (next.players.filter(player => ids.has(player.id) && player.guildId === managementGuildId()).length !== ids.size) {
+      throw new Error('削除対象のプレイヤーが見つかりません。');
+    }
+    next.players = next.players.filter(player => !ids.has(player.id));
+    next.facilities = next.facilities.filter(object => !ids.has(object.playerId));
   }, `${ids.size}人のメンバーと対象の避難所を削除しました。`);
   if (success) {
     for (const id of ids) rankMemberIds.delete(id);
@@ -754,10 +892,16 @@ function selectObject(object, center = false) {
   if (object) {
     $('x').value = object.x;
     $('y').value = object.y;
-    if (object.guildId) $('guild').value = object.guildId;
-    if (object.memberId) $('member-filter').value = '';
+    if (object.type !== 'mountain') $('guild').value = objectGuildId(state, object) ?? '';
+    if (object.playerId) {
+      $('member-filter').value = '';
+      refresh();
+      $('member').value = object.playerId;
+    }
     setCategory(object.type === 'mountain' ? 'mountain' : object.type === 'shelter' ? 'shelter' : 'facilities');
     $('type').value = object.type;
+    placementPreviewActive = false;
+    relocationPreviewActive = false;
     if (center) Object.assign(view, { x: object.x, y: object.y });
   }
   refresh();
@@ -767,7 +911,7 @@ function selectObject(object, center = false) {
     placementPreviewActive = false;
     relocationPreviewActive = false;
   }
-  if (object?.memberId) $('member').value = object.memberId;
+  if (object?.playerId) $('member').value = object.playerId;
   refreshPersistence();
   rememberGuild();
 }
@@ -802,9 +946,9 @@ function openObjectContextMenu(object, clientX, clientY) {
   if (!editable() || !$('object-context-menu').hidden) return;
   selectObject(object);
   const menu = $('object-context-menu');
-  const owner = state.guilds.find(entry => entry.id === object.guildId);
+  const owner = state.guilds.find(entry => entry.id === objectGuildId(state, object));
   const member = object.type === 'shelter'
-    ? owner?.members.find(entry => entry.id === object.memberId) : null;
+    ? shelterPlayer(object) : null;
   const facilityName = object.type === 'mountain'
     ? '山岳'
     : object.type === 'shelter' ? member?.name ?? TYPES.shelter.name : TYPES[object.type].name;
@@ -821,20 +965,16 @@ function openObjectContextMenu(object, clientX, clientY) {
   if (object.type === 'shelter') {
     if (member) {
       actions.push(
-        { label: 'ランク変更', run: () => {
-          contextMember = { guildId: object.guildId, memberId: object.memberId };
+        ...(member.guildId === null ? [] : [{ label: 'ランク変更', run: () => {
+          contextMember = { guildId: member.guildId, memberId: member.id };
           $('shelter-rank-select').value = member.rank == null ? '' : String(member.rank);
           $('shelter-rank-dialog').querySelector('.dialog-status').textContent = '';
           $('shelter-rank-dialog').showModal();
-        } },
-        { label: '名前を変更', run: () => {
-          editingMemberId = member.id;
-          editingMemberGuildId = object.guildId;
-          $('member-name-input').value = member.name;
-          $('member-name-dialog').querySelector('.dialog-status').textContent = '';
-          $('member-name-dialog').showModal();
-          $('member-name-input').focus();
-        } },
+        } }]),
+        { label: 'プレイヤーを編集', run: () => openPlayerActions(member) },
+        { label: member.guildId === null ? 'ギルドに加盟' : '別ギルドへ移籍',
+          run: () => openMembershipDialog(member) },
+        ...(member.guildId === null ? [] : [{ label: 'ギルドから脱退', run: () => leaveGuild(member) }]),
       );
     }
   } else if (object.type === 'fortress') {
@@ -864,8 +1004,8 @@ function openTerritoryContextMenu(guildIds, cell, clientX, clientY) {
   header.className = 'object-context-menu-header';
   header.setAttribute('role', 'presentation');
   const title = document.createElement('span');
-  title.textContent = guildIds.map(id => state.guilds.find(entry => entry.id === id)?.name)
-    .filter(Boolean).map(code => `[${code}]`).join(' / ');
+  title.textContent = guildIds.map(id => state.guilds.find(entry => entry.id === id))
+    .filter(Boolean).map(owner => `[${owner.name}] 総勢${membersFor(state, owner.id).length}名`).join(' / ');
   const coordinates = document.createElement('span');
   const serverNumber = /^S(\d+)$/.exec(serverId)?.[1] ?? '—';
   coordinates.textContent = `S:${serverNumber} X:${cell.x} Y:${cell.y}`;
@@ -911,10 +1051,10 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (document.querySelector('dialog[open]')) return;
-  if (editable() && $('mode').value === 'place' && placementPreviewActive && !relocationPreviewActive) {
+  if (selectedId || (editable() && placementPreviewActive)) {
     event.preventDefault();
-    selectObject(null);
-    status('新規配置プレビューを解除しました。');
+    enterBrowseMode();
+    status('選択・配置プレビューを解除して閲覧モードにしました。');
   }
 });
 canvas.addEventListener('contextmenu', event => {
@@ -943,7 +1083,34 @@ canvas.addEventListener('contextmenu', event => {
   }
   openObjectContextMenu(object, event.clientX, event.clientY);
 });
-$('object-clear').addEventListener('click', () => selectObject(null));
+function enterBrowseMode() {
+  drag = null;
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+  selectObject(null);
+  $('mode').value = 'browse';
+  requestDraw();
+}
+$('object-clear').addEventListener('click', enterBrowseMode);
+$('map-browse').addEventListener('click', enterBrowseMode);
+for (const [type, name] of searchableObjectTypes) {
+  const label = document.createElement('label');
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = true;
+  checkbox.dataset.objectType = type;
+  const icon = document.createElement('span');
+  icon.className = `object-result-icon facility-${type}`;
+  icon.setAttribute('aria-hidden', 'true');
+  label.append(checkbox, icon, document.createTextNode(name));
+  checkbox.addEventListener('change', () => {
+    if (checkbox.checked) objectTypeFilters.add(type);
+    else objectTypeFilters.delete(type);
+    objectResultLimit = 100;
+    renderObjectList();
+  });
+  $('object-type-filters').append(label);
+}
 $('object-search').addEventListener('click', () => {
   objectResultLimit = 100;
   $('object-filter').value = '';
@@ -971,7 +1138,7 @@ $('member-export-copy').addEventListener('click', async () => {
 $('member-dialog-filter').addEventListener('input', renderMemberList);
 $('member-select-visible').addEventListener('click', () => {
   const query = $('member-dialog-filter').value.trim().toLocaleLowerCase();
-  const members = guild()?.members ?? [];
+  const members = managementMembers();
   const matches = members.filter(member => member.name.toLocaleLowerCase().includes(query));
   const filtered = query && matches.length < members.length;
   const includeFilteredOut = filtered && window.confirm(
@@ -1277,6 +1444,34 @@ function diamond(x, y, fill, stroke = null, lineWidth = 1, inset = 0) {
   if (stroke) { context.strokeStyle = stroke; context.lineWidth = lineWidth; context.stroke(); }
 }
 function objectDiamond(object, fill, stroke = null, lineWidth = 1, inset = 0) {
+  if (object.type === 'mountain' && footprint(object).length < 4) {
+    const edges = cellBoundary(footprint(object));
+    if (!edges.length) return;
+    const vertices = [edges[0][0]];
+    let end = edges[0][1];
+    while (end[0] !== vertices[0][0] || end[1] !== vertices[0][1]) {
+      vertices.push(end);
+      const next = edges.find(([start]) => start[0] === end[0] && start[1] === end[1]);
+      if (!next || vertices.length > edges.length) throw new Error('山岳の外周を描画できません。');
+      end = next[1];
+    }
+    context.beginPath();
+    vertices.forEach(([x, y], index) => {
+      const before = vertices[(index + vertices.length - 1) % vertices.length];
+      const after = vertices[(index + 1) % vertices.length];
+      const dx1 = x - before[0], dy1 = y - before[1];
+      const dx2 = after[0] - x, dy2 = after[1] - y;
+      const divisor = 2 + dx1 * dx2 + dy1 * dy2;
+      const offset = inset / view.scale / divisor;
+      const p = screen(x - (dy1 + dy2) * offset, y + (dx1 + dx2) * offset);
+      if (index === 0) context.moveTo(p.x, p.y);
+      else context.lineTo(p.x, p.y);
+    });
+    context.closePath();
+    if (fill) { context.fillStyle = fill; context.fill(); }
+    if (stroke) { context.strokeStyle = stroke; context.lineWidth = lineWidth; context.stroke(); }
+    return;
+  }
   const center = screen(object.x, object.y - (object.size === 1 ? 0 : 1));
   const radius = Math.max(0, view.scale * object.size - inset);
   context.beginPath();
@@ -1359,6 +1554,21 @@ function requestDraw() {
   frame = requestAnimationFrame(() => { frame = null; draw(); });
 }
 function draw() {
+  const placing = !maximized && placementPreview() !== null && !drag?.moved;
+  const movable = !maximized && editable() && $('mode').value !== 'browse' && selected();
+  const dragging = drag?.moved;
+  const interactionLabel = dragging
+    ? drag.object ? '✥ 施設移動中' : '✋ 画面移動中'
+    : placing ? relocationPreviewActive || $('mode').value !== 'place' ? '＋ 座標配置待機中' : '＋ 配置待機中'
+      : movable ? '✥ 施設選択中' : '✋ 閲覧・画面移動';
+  if ($('interaction-state').textContent !== interactionLabel) $('interaction-state').textContent = interactionLabel;
+  $('interaction-state').dataset.state = dragging && drag.object ? 'move'
+    : placing ? 'place' : movable ? 'selected' : 'browse';
+  canvas.style.cursor = dragging ? drag.object ? 'move' : 'grabbing'
+    : placing && $('mode').value === 'place' ? 'crosshair'
+      : movable && hover && objectAt(state, hover.x, hover.y)?.id === selectedId ? 'move' : 'grab';
+  const zoomLabel = `${Math.round(view.scale / 14 * 100)}%`;
+  if ($('zoom-level').textContent !== zoomLabel) $('zoom-level').textContent = zoomLabel;
   context.clearRect(0, 0, width, height);
   context.fillStyle = '#202a30';
   context.fillRect(0, 0, width, height);
@@ -1457,7 +1667,7 @@ function draw() {
     const cells = footprint(object);
     if (!cells.some(c => visible(c.x, c.y))) continue;
     const member = object.type === 'shelter'
-      ? state.guilds.find(g => g.id === object.guildId)?.members.find(m => m.id === object.memberId) : null;
+      ? shelterPlayer(object) : null;
     const fill = object.type === 'mountain' ? colors.mountain : TYPES[object.type].color;
     const objectInset = view.scale * .25;
     objectDiamond(object, fill, object.type === 'fortress' ? '#ffe69b' : '#efebc2', .45, objectInset);
@@ -1547,12 +1757,16 @@ function draw() {
 }
 
 function drawObjectLabel(object, highlight = false) {
-    const p = screen(object.x, object.y - (object.size === 1 ? 0 : 1));
-    const owner = state.guilds.find(g => g.id === object.guildId);
-    const own = object.guildId === state.ownGuildId;
-    const name = object.type === 'shelter' ? owner.members.find(m => m.id === object.memberId).name : '';
+    const cells = footprint(object);
+    const p = object.type === 'mountain'
+      ? screen(cells.reduce((sum, cell) => sum + cell.x, 0) / cells.length,
+        cells.reduce((sum, cell) => sum + cell.y, 0) / cells.length)
+      : screen(object.x, object.y - (object.size === 1 ? 0 : 1));
+    const owner = state.guilds.find(g => g.id === objectGuildId(state, object));
+    const own = !!owner && owner.id === state.ownGuildId;
+    const name = object.type === 'shelter' ? shelterPlayer(object).name : '';
     const text = object.type === 'mountain' ? '山岳' :
-      object.type === 'shelter' ? `${own ? '' : `[${owner.name}]`}${name}` :
+      object.type === 'shelter' ? `${own || !owner ? '' : `[${owner.name}]`}${name}` :
       object.type === 'fortress' ? `[${owner.name}] 要塞` : TYPES[object.type].short;
     context.font = `${highlight || object.type === 'fortress' ? 'bold ' : ''}${Math.max(10, Math.min(
       object.type === 'fortress' ? 18 : 15, view.scale))}px system-ui`;
@@ -1566,15 +1780,16 @@ function drawObjectLabel(object, highlight = false) {
       context.fillRect(p.x - size.width / 2 - 5, p.y - 11, size.width + 10, 22);
     }
     context.strokeText(text, p.x, p.y);
-    context.fillStyle = highlight ? '#ffb8ed' : object.type === 'shelter' ? own ? '#69d5ff' : '#ffe16b' : '#fff';
+    context.fillStyle = highlight ? '#ffb8ed' : object.type === 'shelter'
+      ? !owner ? '#f5f5f5' : own ? '#69d5ff' : '#ffe16b' : '#fff';
     context.fillText(text, p.x, p.y);
 }
 
 function placementPreview() {
   if (maximized) return null;
   const moving = drag?.object && drag.moved;
-  if ((!moving && !placementPreviewActive) || !editable() || (category !== 'mountain' && (!guild()
-    || (category === 'shelter' && !$('member').value)))) return null;
+  if ((!moving && !placementPreviewActive) || !editable() || (category === 'facilities' && !guild())
+    || (category === 'shelter' && !canPlaceShelter())) return null;
   const x = $('x').valueAsNumber;
   const y = $('y').valueAsNumber;
   const pointerCell = !relocationPreviewActive && $('mode').value === 'place' ? hover : null;
@@ -1593,11 +1808,12 @@ function drawPlacementPreview(visible) {
   const existing = moving ? null : matchingPlacement(preview);
   const previous = moving ? drag.object : placedFacility(state, preview);
   const error = existing ? null : placementError(state, preview, previous?.id);
-  const color = existing ? '#ffffff' : error ? '#ff7777' : '#d7ff91';
+  const color = error ? '#ff7777' : '#ffffff';
+  const objectColor = preview.type === 'mountain' ? colors.mountain : TYPES[preview.type].color;
   context.save();
   context.setLineDash(existing ? [] : [6, 4]);
-  objectDiamond(preview, existing ? null : error ? '#ff5e5e66' : '#d7ff9144',
-    color, preview.type === 'shelter' ? 2 : .65, view.scale * .25);
+  objectDiamond(preview, existing ? null : error ? '#ff5e5e66' : `${objectColor}99`,
+    color, preview.type === 'shelter' ? 2 : 1.25, view.scale * .25);
   context.setLineDash([]);
   const p = screen(preview.x, preview.y - 3);
   const detached = preview.type.startsWith('outpost') && territorySources({
@@ -1690,7 +1906,7 @@ canvas.addEventListener('pointerdown', event => {
   const raw = world(point);
   const cell = raw.x >= 0 && raw.x <= 511 && raw.y >= 0 && raw.y <= 1023 ? snapCell(raw.x, raw.y) : null;
   const hit = cell ? objectAt(state, cell.x, cell.y) : null;
-  const object = !maximized && editable() && hit?.id === selectedId ? hit : null;
+  const object = !maximized && editable() && $('mode').value !== 'browse' && hit?.id === selectedId ? hit : null;
   drag = { id: event.pointerId, start: point, point, moved: false, object,
     candidate: object ? { ...object } : null, origin: raw };
   canvas.setPointerCapture(event.pointerId);
@@ -1790,17 +2006,17 @@ canvas.addEventListener('pointerup', event => {
   $('x').value = cell.x;
   $('y').value = cell.y;
   const hit = objectAt(state, cell.x, cell.y);
-  if (hit) {
+  if (hit && $('mode').value !== 'browse') {
     selectObject(hit);
     $('mode').value = 'select';
     status(!maximized && editable() ? '施設を選択しました。選択した施設をドラッグすると移動できます。' : '施設を選択しました。閲覧のみです。');
   } else {
     const guildIds = territoryGuilds(state, cell.x, cell.y);
-    const placing = !maximized && editable() && $('mode').value === 'place';
-    if (guildIds.length && (!placing || guildIds.length > 1 || guildIds[0] !== $('guild').value)) {
+    const placing = !maximized && editable() && $('mode').value === 'place' && placementPreviewActive;
+    if (placing) place(cell);
+    else if (guildIds.length) {
       selectTerritoryGuilds(guildIds);
-    } else if (placing) place(cell);
-    else selectObject(null);
+    } else if ($('mode').value !== 'browse') selectObject(null);
   }
 });
 canvas.addEventListener('pointercancel', event => {

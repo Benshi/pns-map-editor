@@ -5,7 +5,7 @@ final class MapConflict extends RuntimeException {}
 
 function emptySharedMap(): array
 {
-    return ['version' => 1, 'ownGuildId' => null, 'guilds' => [], 'facilities' => [], 'mountains' => []];
+    return ['version' => 2, 'ownGuildId' => null, 'guilds' => [], 'players' => [], 'facilities' => [], 'mountains' => []];
 }
 
 function registeredMapServers(string $private, array $configured): array
@@ -110,7 +110,7 @@ function mapPolygon(int $x, int $y, array $vertices): bool
 
 function validateSharedMap(mixed $raw): array
 {
-    if (!is_array($raw) || ($raw['version'] ?? null) !== 1) {
+    if (!is_array($raw) || !in_array($raw['version'] ?? null, [1, 2], true)) {
         throw new InvalidArgumentException('対応するマップJSONではありません。');
     }
     foreach (['guilds' => 100, 'facilities' => 11100, 'mountains' => 10000] as $key => $limit) {
@@ -128,7 +128,8 @@ function validateSharedMap(mixed $raw): array
         $ids[$clean] = true;
         return $clean;
     };
-    $members = [];
+    $guildIds = [];
+    $players = [];
     $names = [];
     foreach ($raw['guilds'] as $guild) {
         if (!is_array($guild)) {
@@ -136,35 +137,58 @@ function validateSharedMap(mixed $raw): array
         }
         $gid = $id($guild['id'] ?? null);
         $name = mapText($guild['name'] ?? null);
-        if (isset($names[$name]) || !is_array($guild['members'] ?? null)
-            || !array_is_list($guild['members'])) {
+        if (isset($names[$name])) {
             throw new InvalidArgumentException('ギルド名またはメンバー一覧が不正です。');
         }
         $names[$name] = true;
-        $cleanMembers = [];
-        $memberNames = [];
-        $members[$gid] = [];
-        foreach ($guild['members'] as $member) {
-            if (!is_array($member)) {
-                throw new InvalidArgumentException('メンバーが不正です。');
+        $guildIds[$gid] = true;
+        $map['guilds'][] = ['id' => $gid, 'name' => $name];
+        if ($raw['version'] === 1) {
+            if (!is_array($guild['members'] ?? null) || !array_is_list($guild['members'])) {
+                throw new InvalidArgumentException('メンバー一覧が不正です。');
             }
-            $mid = $id($member['id'] ?? null);
-            $memberName = mapText($member['name'] ?? null);
-            if (isset($memberNames[$memberName])) {
-                throw new InvalidArgumentException('メンバー名が重複しています。');
-            }
-            $memberNames[$memberName] = true;
-            $members[$gid][$mid] = true;
-            $cleanMembers[] = ['id' => $mid, 'name' => $memberName];
-            $rank = $member['rank'] ?? null;
-            if ($rank !== null) {
-                if (!is_int($rank) || $rank < 1 || $rank > 5) {
-                    throw new InvalidArgumentException('メンバーのランクが不正です。');
+            foreach ($guild['members'] as $member) {
+                if (!is_array($member)) {
+                    throw new InvalidArgumentException('メンバーが不正です。');
                 }
-                $cleanMembers[array_key_last($cleanMembers)]['rank'] = $rank;
+                $member['guildId'] = $gid;
+                $players[] = $member;
             }
         }
-        $map['guilds'][] = ['id' => $gid, 'name' => $name, 'members' => $cleanMembers];
+    }
+    if ($raw['version'] === 2) {
+        if (!is_array($raw['players'] ?? null) || !array_is_list($raw['players'])) {
+            throw new InvalidArgumentException('プレイヤー一覧が不正です。');
+        }
+        $players = $raw['players'];
+    }
+    $playerGuilds = [];
+    $playerNames = [];
+    foreach ($players as $player) {
+        if (!is_array($player) || !array_key_exists('guildId', $player)) {
+            throw new InvalidArgumentException('プレイヤーが不正です。');
+        }
+        $pid = $id($player['id'] ?? null);
+        $name = mapText($player['name'] ?? null);
+        $gid = $player['guildId'];
+        if ($gid !== null && (!is_string($gid) || !isset($guildIds[$gid]))) {
+            throw new InvalidArgumentException('所属ギルドが不正です。');
+        }
+        $key = json_encode([$gid, $name], JSON_THROW_ON_ERROR);
+        if (isset($playerNames[$key])) {
+            throw new InvalidArgumentException('同じ所属のプレイヤー名が重複しています。');
+        }
+        $playerNames[$key] = true;
+        $playerGuilds[$pid] = $gid;
+        $clean = ['id' => $pid, 'name' => $name, 'guildId' => $gid];
+        $rank = $player['rank'] ?? null;
+        if ($rank !== null) {
+            if ($gid === null || !is_int($rank) || $rank < 1 || $rank > 5) {
+                throw new InvalidArgumentException('プレイヤーのランクが不正です。');
+            }
+            $clean['rank'] = $rank;
+        }
+        $map['players'][] = $clean;
     }
     $occupied = [];
     $unique = [];
@@ -185,6 +209,19 @@ function validateSharedMap(mixed $raw): array
             $y = $object['y'];
             $cells = $object['size'] === 1 ? [[$x,$y]] : [[$x,$y],[$x-1,$y-1],[$x,$y-2],[$x+1,$y-1]];
             foreach ($cells as [$cx,$cy]) {
+                if (!mapCell($cx, $cy)) {
+                    throw new InvalidArgumentException('施設全体をマップ内に配置してください。');
+                }
+            }
+            if ($list === 'mountains') {
+                $cells = array_values(array_filter($cells,
+                    static fn(array $cell): bool => mapPolygon($cell[0], $cell[1], $lab)
+                        || !mapPolygon($cell[0], $cell[1], $wasteland)));
+                if (!$cells) {
+                    throw new InvalidArgumentException('山岳の一部は緑地に配置してください。');
+                }
+            }
+            foreach ($cells as [$cx,$cy]) {
                 $key = "$cx,$cy";
                 if (!mapCell($cx, $cy) || isset($occupied[$key])
                     || mapPolygon($cx, $cy, $lab)
@@ -195,18 +232,21 @@ function validateSharedMap(mixed $raw): array
                 $occupied[$key] = true;
             }
             if ($list === 'facilities') {
-                $gid = $source['guildId'] ?? null;
-                if (!is_string($gid) || !isset($members[$gid])) {
-                    throw new InvalidArgumentException('所属ギルドが不正です。');
-                }
-                $object['guildId'] = $gid;
+                $gid = null;
                 $mid = null;
                 if ($object['type'] === 'shelter') {
-                    $mid = $source['memberId'] ?? null;
-                    if (!is_string($mid) || !isset($members[$gid][$mid])) {
+                    $mid = $source[$raw['version'] === 1 ? 'memberId' : 'playerId'] ?? null;
+                    if (!is_string($mid) || !array_key_exists($mid, $playerGuilds)
+                        || ($raw['version'] === 1 && $playerGuilds[$mid] !== ($source['guildId'] ?? null))) {
                         throw new InvalidArgumentException('所属メンバーが不正です。');
                     }
-                    $object['memberId'] = $mid;
+                    $object['playerId'] = $mid;
+                } else {
+                    $gid = $source['guildId'] ?? null;
+                    if (!is_string($gid) || !isset($guildIds[$gid])) {
+                        throw new InvalidArgumentException('所属ギルドが不正です。');
+                    }
+                    $object['guildId'] = $gid;
                 }
                 $key = json_encode([$gid, $object['type'], $mid], JSON_THROW_ON_ERROR);
                 if (isset($unique[$key])) {
