@@ -29,6 +29,31 @@ export function orderedMembers(members) {
 export function membersFor(state, guildId) {
   return state.players.filter(player => player.guildId === guildId);
 }
+export function reorderMember(state, guildId, memberId, beforeId = null) {
+  const member = membersFor(state, guildId).find(player => player.id === memberId);
+  if (!member) throw new Error('移動するメンバーが見つかりません。');
+  const group = membersFor(state, guildId).filter(player => (player.rank ?? null) === (member.rank ?? null));
+  if (beforeId !== null && !group.some(player => player.id === beforeId)) {
+    throw new Error('移動先は同じ所属・ランクのメンバーを選択してください。');
+  }
+  if (beforeId === memberId) return;
+  const reordered = group.filter(player => player.id !== memberId);
+  reordered.splice(beforeId === null ? reordered.length : reordered.findIndex(player => player.id === beforeId), 0, member);
+  const ids = new Set(group.map(player => player.id));
+  let index = 0;
+  state.players = state.players.map(player => ids.has(player.id) ? reordered[index++] : player);
+}
+
+export const DEFAULT_SCALE = 14;
+export const MIN_SCALE = .3;
+export const MAX_SCALE = 42;
+export function edgeVelocity(position, size) {
+  const margin = Math.min(56, size / 4);
+  if (margin <= 0 || position < -margin || position > size + margin) return 0;
+  if (position < margin) return -360 * Math.min(1, (margin - position) / margin) ** 2;
+  if (position > size - margin) return 360 * Math.min(1, (position - size + margin) / margin) ** 2;
+  return 0;
+}
 export function objectGuildId(state, object) {
   return object.type === 'shelter'
     ? state.players.find(player => player.id === object.playerId)?.guildId ?? null : object.guildId;
@@ -91,7 +116,9 @@ export function parseMapView(search) {
   const scale = params.get('scale');
   const code = params.get('map');
   const revision = params.get('revision');
-  for (const key of ['server', 'guild', 'scale', 'map', 'revision']) {
+  const x = params.get('x');
+  const y = params.get('y');
+  for (const key of ['server', 'guild', 'scale', 'map', 'revision', 'x', 'y']) {
     if (params.getAll(key).length > 1) throw new Error(`URLの${key}は1つだけ指定してください。`);
   }
   if (server !== null && !/^(?:S)?[0-9]{1,10}$/.test(server)) throw new Error('URLのserverはサーバー番号で指定してください。');
@@ -100,21 +127,27 @@ export function parseMapView(search) {
   if (code !== null && (!/^[A-Za-z0-9_-]{12}$/.test(code) || server !== null)) {
     throw new Error('URLのmapは12文字の共有コードで、serverとは別に指定してください。');
   }
-  if (scale !== null && (!scale.trim() || !Number.isFinite(Number(scale)) || Number(scale) < .3 || Number(scale) > 40)) {
-    throw new Error('URLのscaleは0.3〜40で指定してください。');
+  if (scale !== null && (!scale.trim() || !Number.isFinite(Number(scale)) || Number(scale) < MIN_SCALE || Number(scale) > MAX_SCALE)) {
+    throw new Error('URLのscaleは0.3〜42（最大300%）で指定してください。');
+  }
+  if ((x === null) !== (y === null) || (x !== null && (
+    !x.trim() || !y.trim() || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))
+    || Number(x) < 0 || Number(x) > 511 || Number(y) < 0 || Number(y) > 1023))) {
+    throw new Error('URLの中心座標はx（0〜511）とy（0〜1023）を組で指定してください。');
   }
   if (revision !== null && !/^[1-9][0-9]{0,8}$/.test(revision)) {
     throw new Error('URLのrevisionは1〜999999999の版番号で指定してください。');
   }
   return { server: server === null ? null : server.startsWith('S') ? server : `S${server}`,
-    guild, scale: scale === null ? 14 : Number(scale), code,
+    guild, scale: scale === null ? DEFAULT_SCALE : Number(scale), code,
+    x: x === null ? null : Number(x), y: y === null ? null : Number(y),
     revision: revision === null ? null : Number(revision) };
 }
 
-export function initialMapView(state, code, scale) {
+export function initialMapView(state, code, scale, x = null, y = null) {
   const guild = state.guilds.find(g => g.name === code);
   const fortress = guild && state.facilities.find(o => o.type === 'fortress' && o.guildId === guild.id);
-  return { x: fortress?.x ?? 256, y: fortress?.y ?? 512, scale };
+  return { x: x ?? fortress?.x ?? 256, y: y ?? fortress?.y ?? 512, scale };
 }
 
 export function renameGuild(state, guildId, name) {

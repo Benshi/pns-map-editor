@@ -2,7 +2,7 @@ import { TYPES, RANKS, shelterColor, rankName, orderedMembers, setMemberRanks, t
   LAB, WASTELAND, TURRETS, emptyMap, addGuild, addMembers, renameGuild, renameMember, snapCell, validCell,
   footprint, cellKey, terrain, objectAt, placeObject, placementError, importMap, parseMapView, initialMapView,
   territoryBoundary, cellBoundary, placedFacility, mapOutline, membersFor, objectGuildId,
-  changeMembership, deleteGuild } from './model.js';
+  changeMembership, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MIN_SCALE, MAX_SCALE } from './model.js';
 import { EditHistory, sharedMap, apiRequest } from './persistence.js';
 
 const $ = id => document.getElementById(id);
@@ -26,6 +26,7 @@ let latestRevision = 0;
 let revisionInfo = null;
 let viewingPast = false;
 let loaded = localMode;
+let viewInitialized = false;
 let busy = false;
 let session = { user: null, csrf: '' };
 let preferences = {};
@@ -42,6 +43,12 @@ let editingMemberId = '';
 let editingMemberGuildId = '';
 let deletingMemberIds = [];
 let rankSelectionGuildId = '';
+let memberOrderDraft = null;
+let reorderSelectedId = '';
+let memberDrag = null;
+let edgeFrame = null;
+let edgeStarted = null;
+let edgeLastTime = null;
 let objectResultLimit = 100;
 const searchableObjectTypes = [
   ['fortress', '要塞'], ['outpost', '前哨'], ['shelter', '避難所'],
@@ -59,7 +66,7 @@ let membershipPlayerId = '';
 let width = 0;
 let height = 0;
 let frame = null;
-const view = { x: 256, y: 512, scale: 14 };
+const view = { x: 256, y: 512, scale: DEFAULT_SCALE };
 
 function status(message, error = false) {
   $('status').textContent = message;
@@ -335,8 +342,24 @@ function memberRankSelection(matches) {
 }
 
 function renderMemberList() {
+  const scrollTop = $('member-list').scrollTop;
   $('member-dialog-title').textContent = 'プレイヤー管理';
-  const members = managementMembers();
+  const members = memberOrderDraft ? membersFor(memberOrderDraft, managementGuildId()) : managementMembers();
+  const reordering = memberOrderDraft !== null;
+  $('member-guild').disabled = reordering;
+  $('member-dialog-filter').disabled = reordering;
+  $('member-reorder').hidden = reordering;
+  $('member-reorder').disabled = !editable() || members.length < 2;
+  $('member-reorder-done').hidden = !reordering;
+  $('member-reorder-cancel').hidden = !reordering;
+  $('member-reorder-hint').hidden = !reordering;
+  $('member-select-visible').hidden = reordering;
+  $('member-register').hidden = reordering;
+  if (reordering) {
+    $('member-reorder-hint').textContent = reorderSelectedId
+      ? `${members.find(member => member.id === reorderSelectedId)?.name ?? ''} を移動：同じランクの移動先をタップしてください。`
+      : '≡をドラッグして同ランク内で移動。端に寄せるとスクロールします。名前をタップして移動先を選ぶ方法も使えます。';
+  }
   if (rankSelectionGuildId !== managementGuildId()) {
     rankMemberIds.clear();
     rankSelectionGuildId = managementGuildId();
@@ -390,10 +413,14 @@ function renderMemberList() {
     summary.append(rankNameElement, selectedCount, groupCounts);
     const list = document.createElement('div');
     list.className = 'member-rank-members';
+    list.dataset.rank = key;
     for (const member of groupMembers) {
       const shelter = shelters.get(member.id);
       const row = document.createElement('div');
       row.className = 'member-row';
+      row.dataset.memberId = member.id;
+      row.classList.toggle('reordering', reordering);
+      row.classList.toggle('reorder-source', member.id === reorderSelectedId);
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.checked = rankMemberIds.has(member.id);
@@ -408,14 +435,45 @@ function renderMemberList() {
       memberButton.type = 'button';
       memberButton.className = 'member-row-name';
       memberButton.textContent = `${member.name} — ${shelter ? `配置済み (${shelter.x},${shelter.y})` : '未配置'}`;
-      memberButton.addEventListener('click', () => openPlayerActions(member));
-      row.append(checkbox, memberButton);
+      memberButton.addEventListener('click', () => {
+        if (!memberOrderDraft) return openPlayerActions(member);
+        if (!reorderSelectedId || reorderSelectedId === member.id) {
+          reorderSelectedId = reorderSelectedId === member.id ? '' : member.id;
+          renderMemberList();
+        } else moveDraftMember(reorderSelectedId, member.id);
+      });
+      if (reordering) {
+        const handle = document.createElement('button');
+        handle.type = 'button';
+        handle.className = 'member-drag-handle';
+        handle.textContent = '≡';
+        handle.setAttribute('aria-label', `${member.name}の順番を移動`);
+        row.append(handle, memberButton);
+      } else row.append(checkbox, memberButton);
       list.append(row);
+    }
+    if (reordering && groupMembers.length) {
+      const end = document.createElement('button');
+      end.type = 'button';
+      end.textContent = 'このランクの末尾へ';
+      end.disabled = !reorderSelectedId;
+      end.addEventListener('click', () => {
+        const member = members.find(entry => entry.id === reorderSelectedId);
+        if (String(member?.rank ?? 'unset') !== key) {
+          return status('同じランクの移動先を選択してください。', true);
+        }
+        moveDraftMember(reorderSelectedId, null);
+      });
+      list.append(end);
     }
     group.append(summary, list);
     $('member-list').append(group);
   }
   memberRankSelection(matches);
+  if (reordering) {
+    $('member-selection-actions').hidden = true;
+    $('member-clear-checks').hidden = true;
+  }
   const rows = orderedMembers(members).map(member => {
     const shelter = shelters.get(member.id);
     return [rankName(member.rank), member.name, shelter ? '配置済み' : '未配置',
@@ -424,6 +482,110 @@ function renderMemberList() {
   $('member-export').value = ['ランク\t名前\t配置状態\tX\tY', ...rows].join('\n');
   $('member-export-status').textContent = '';
   refreshPersistence();
+  $('member-list').scrollTop = scrollTop;
+}
+
+function moveDraftMember(id, beforeId) {
+  try {
+    reorderMember(memberOrderDraft, managementGuildId(), id, beforeId);
+    reorderSelectedId = '';
+    const scrollTop = $('member-list').scrollTop;
+    renderMemberList();
+    $('member-list').scrollTop = scrollTop;
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+function cancelMemberReorder() {
+  endMemberDrag();
+  memberOrderDraft = null;
+  reorderSelectedId = '';
+  renderMemberList();
+}
+$('member-reorder').addEventListener('click', () => {
+  if (!editable()) return status('並び替えには編集権限が必要です。', true);
+  memberOrderDraft = { players: structuredClone(state.players) };
+  reorderSelectedId = '';
+  $('member-dialog-filter').value = '';
+  $('member-registration').hidden = true;
+  $('member-register').setAttribute('aria-expanded', 'false');
+  rankMemberIds.clear();
+  renderMemberList();
+});
+$('member-reorder-cancel').addEventListener('click', cancelMemberReorder);
+$('member-reorder-done').addEventListener('click', () => {
+  if (!memberOrderDraft) return;
+  endMemberDrag();
+  const ids = memberOrderDraft.players.map(member => member.id);
+  if (update(next => {
+    const players = new Map(next.players.map(member => [member.id, member]));
+    if (ids.length !== players.size || ids.some(id => !players.has(id))) {
+      throw new Error('メンバー一覧が変更されています。並び替えをやり直してください。');
+    }
+    next.players = ids.map(id => players.get(id));
+  }, 'メンバーの並び順を変更しました。')) cancelMemberReorder();
+});
+$('member-dialog').addEventListener('close', cancelMemberReorder);
+
+function memberDropTarget() {
+  const source = $('member-list').querySelector(`[data-member-id="${CSS.escape(memberDrag.memberId)}"]`);
+  const group = source?.parentElement;
+  if (!group) return;
+  const rect = $('member-list').getBoundingClientRect();
+  const inside = memberDrag.x >= rect.left && memberDrag.x <= rect.right
+    && memberDrag.y >= rect.top - 56 && memberDrag.y <= rect.bottom + 56;
+  const rows = [...group.querySelectorAll('.member-row')].filter(row => row !== source);
+  const target = rows.find(row => {
+    const bounds = row.getBoundingClientRect();
+    return memberDrag.y < bounds.top + bounds.height / 2;
+  });
+  memberDrag.valid = inside;
+  memberDrag.beforeId = target?.dataset.memberId ?? null;
+  for (const row of $('member-list').querySelectorAll('.reorder-before')) row.classList.remove('reorder-before');
+  for (const list of $('member-list').querySelectorAll('.reorder-end')) list.classList.remove('reorder-end');
+  if (inside) {
+    if (target) target.classList.add('reorder-before');
+    else group.classList.add('reorder-end');
+  }
+}
+function endMemberDrag() {
+  const completed = memberDrag;
+  memberDrag = null;
+  if (completed && $('member-list').hasPointerCapture(completed.pointerId)) {
+    $('member-list').releasePointerCapture(completed.pointerId);
+  }
+  for (const element of $('member-list').querySelectorAll('.reorder-source, .reorder-before, .reorder-end')) {
+    element.classList.remove('reorder-source', 'reorder-before', 'reorder-end');
+  }
+  return completed;
+}
+$('member-list').addEventListener('pointerdown', event => {
+  const handle = event.target.closest('.member-drag-handle');
+  if (!handle || !memberOrderDraft || !event.isPrimary || event.button !== 0) return;
+  event.preventDefault();
+  const row = handle.closest('.member-row');
+  memberDrag = { pointerId: event.pointerId, memberId: row.dataset.memberId,
+    x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY,
+    moved: false, valid: false, beforeId: null };
+  row.classList.add('reorder-source');
+  $('member-list').setPointerCapture(event.pointerId);
+  startEdgeMotion();
+});
+$('member-list').addEventListener('pointermove', event => {
+  if (!memberDrag || memberDrag.pointerId !== event.pointerId) return;
+  memberDrag.x = event.clientX;
+  memberDrag.y = event.clientY;
+  memberDrag.moved ||= Math.hypot(event.clientX - memberDrag.startX, event.clientY - memberDrag.startY) > 5;
+  if (memberDrag.moved) memberDropTarget();
+});
+$('member-list').addEventListener('pointerup', event => {
+  if (!memberDrag || memberDrag.pointerId !== event.pointerId) return;
+  if (memberDrag.moved) memberDropTarget();
+  const completed = endMemberDrag();
+  if (completed.moved && completed.valid) moveDraftMember(completed.memberId, completed.beforeId);
+});
+for (const type of ['pointercancel', 'lostpointercapture']) {
+  $('member-list').addEventListener(type, endMemberDrag);
 }
 
 function renderObjectList() {
@@ -774,7 +936,11 @@ $('guild').addEventListener('change', () => {
   setGuildPlacementMode();
   rememberGuild();
   const fortress = state.facilities.find(o => o.type === 'fortress' && o.guildId === $('guild').value);
-  if (fortress) { Object.assign(view, { x: fortress.x, y: fortress.y, scale: 14 }); requestDraw(); }
+  if (fortress) {
+    Object.assign(view, { x: fortress.x, y: fortress.y, scale: DEFAULT_SCALE });
+    updateMapUrl();
+    requestDraw();
+  }
 });
 $('member').addEventListener('change', () => {
   placementPreviewActive = true;
@@ -1211,10 +1377,14 @@ async function loadServerOptions() {
   return servers;
 }
 function updateMapUrl() {
-  if (localMode || !loaded || !serverId) return;
+  if (!viewInitialized || !loaded || (!localMode && !serverId)) return;
   const url = new URL(location.href);
   url.searchParams.delete('hash');
-  if (serverCode) {
+  url.searchParams.set('scale', String(view.scale));
+  if (localMode) {
+    url.searchParams.delete('map');
+    url.searchParams.delete('server');
+  } else if (serverCode) {
     url.searchParams.set('map', serverCode);
     url.searchParams.delete('server');
   } else {
@@ -1350,9 +1520,10 @@ async function initializeStorage() {
       $('guild').value = target?.id ?? '';
       refresh();
       setGuildPlacementMode();
-      if (!target) status(`URLで指定したギルド「${link.guild}」が見つかりません。中央基地を表示します。`, true);
+      if (!target) status(`URLで指定したギルド「${link.guild}」が見つかりません。${link.x === null ? '中央基地' : '指定座標'}を表示します。`, true);
     }
-    Object.assign(view, initialMapView(state, link.guild, link.scale));
+    Object.assign(view, initialMapView(state, link.guild, link.scale, link.x, link.y));
+    viewInitialized = true;
     requestDraw();
     updateMapUrl();
   };
@@ -1430,6 +1601,53 @@ function pointer(event) {
 function world(point) {
   return { x: view.x + (point.x - width / 2) / view.scale,
     y: view.y + (point.y - height / 2) / view.scale };
+}
+function updateDragCandidate(point) {
+  const raw = world(point);
+  const cell = snapCell(drag.object.x + raw.x - drag.origin.x, drag.object.y + raw.y - drag.origin.y);
+  drag.candidate = { ...drag.object, ...cell };
+  $('x').value = cell.x;
+  $('y').value = cell.y;
+  hover = cell;
+  $('cursor').textContent = `X:${cell.x} Y:${cell.y}`;
+}
+function startEdgeMotion() {
+  if (edgeFrame !== null) return;
+  edgeStarted = null;
+  edgeLastTime = null;
+  const tick = time => {
+    edgeFrame = null;
+    if (!memberDrag && !drag) return;
+    const seconds = edgeLastTime === null ? 0 : Math.min(.05, (time - edgeLastTime) / 1000);
+    edgeLastTime = time;
+    let vx = 0;
+    let vy = 0;
+    if (memberDrag?.moved) {
+      const rect = $('member-list').getBoundingClientRect();
+      if (memberDrag.x >= rect.left && memberDrag.x <= rect.right) {
+        vy = edgeVelocity(memberDrag.y - rect.top, rect.height);
+      }
+    } else if (drag?.moved && drag.object && editable() && !maximized) {
+      vx = edgeVelocity(drag.point.x, width);
+      vy = edgeVelocity(drag.point.y, height);
+    }
+    if (!vx && !vy) edgeStarted = null;
+    else if (edgeStarted === null) edgeStarted = time;
+    else if (time - edgeStarted >= 180) {
+      if (memberDrag) {
+        $('member-list').scrollTop += vy * seconds;
+        memberDropTarget();
+      } else {
+        markMapInteracting();
+        view.x += vx * seconds / view.scale;
+        view.y += vy * seconds / view.scale;
+        updateDragCandidate(drag.point);
+        requestDraw();
+      }
+    }
+    edgeFrame = requestAnimationFrame(tick);
+  };
+  edgeFrame = requestAnimationFrame(tick);
 }
 function diamond(x, y, fill, stroke = null, lineWidth = 1, inset = 0) {
   const p = screen(x, y);
@@ -1560,15 +1778,19 @@ function draw() {
   const interactionLabel = dragging
     ? drag.object ? '✥ 施設移動中' : '✋ 画面移動中'
     : placing ? relocationPreviewActive || $('mode').value !== 'place' ? '＋ 座標配置待機中' : '＋ 配置待機中'
-      : movable ? '✥ 施設選択中' : '✋ 閲覧・画面移動';
+      : movable ? '✥ 施設選択中' : '✋ 画面移動';
   if ($('interaction-state').textContent !== interactionLabel) $('interaction-state').textContent = interactionLabel;
   $('interaction-state').dataset.state = dragging && drag.object ? 'move'
     : placing ? 'place' : movable ? 'selected' : 'browse';
+  $('map-access').textContent = !maximized && editable() && $('mode').value !== 'browse'
+    ? '編集可能モード' : '閲覧モード';
+  $('map-browse').setAttribute('aria-pressed', String($('mode').value === 'browse'));
   canvas.style.cursor = dragging ? drag.object ? 'move' : 'grabbing'
     : placing && $('mode').value === 'place' ? 'crosshair'
       : movable && hover && objectAt(state, hover.x, hover.y)?.id === selectedId ? 'move' : 'grab';
-  const zoomLabel = `${Math.round(view.scale / 14 * 100)}%`;
-  if ($('zoom-level').textContent !== zoomLabel) $('zoom-level').textContent = zoomLabel;
+  if (document.activeElement !== $('zoom-level')) {
+    $('zoom-level').value = String(Math.round(view.scale / DEFAULT_SCALE * 100));
+  }
   context.clearRect(0, 0, width, height);
   context.fillStyle = '#202a30';
   context.fillRect(0, 0, width, height);
@@ -1834,10 +2056,11 @@ function drawPlacementPreview(visible) {
 function zoom(factor, point = { x: width / 2, y: height / 2 }) {
   markMapInteracting();
   const before = world(point);
-  view.scale = Math.max(.3, Math.min(40, view.scale * factor));
+  view.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * factor));
   const after = world(point);
   view.x += before.x - after.x;
   view.y += before.y - after.y;
+  updateMapUrl();
   requestDraw();
   settleMapInteraction();
 }
@@ -1845,11 +2068,41 @@ function home() {
   markMapInteracting();
   const fortress = state.facilities.find(o => o.type === 'fortress' && o.guildId === state.ownGuildId);
   Object.assign(view, { x: fortress?.x ?? 256, y: fortress?.y ?? 512, scale: 14 });
+  updateMapUrl();
   requestDraw();
   settleMapInteraction();
 }
-$('zoom-in').addEventListener('click', () => zoom(1.25));
-$('zoom-out').addEventListener('click', () => zoom(.8));
+function stepZoom(direction, point) {
+  const percent = view.scale / DEFAULT_SCALE * 100;
+  const next = direction > 0 ? (Math.floor((percent + .00001) / 10) + 1) * 10
+    : (Math.ceil((percent - .00001) / 10) - 1) * 10;
+  zoom(Math.max(MIN_SCALE, next / 100 * DEFAULT_SCALE) / view.scale, point);
+}
+$('zoom-in').addEventListener('click', () => stepZoom(1));
+$('zoom-out').addEventListener('click', () => stepZoom(-1));
+$('zoom-level').addEventListener('input', () => {
+  const input = $('zoom-level');
+  input.setCustomValidity('');
+  if (input.value !== '' && input.validity.valid) {
+    zoom(input.valueAsNumber / 100 * DEFAULT_SCALE / view.scale);
+  }
+});
+function commitZoomInput() {
+  const input = $('zoom-level');
+  const percent = input.valueAsNumber;
+  if (!Number.isFinite(percent) || !input.validity.valid) {
+    status('拡大率は2〜300%で入力してください（最小表示倍率は約2.14%です）。', true);
+  } else zoom(percent / 100 * DEFAULT_SCALE / view.scale);
+  input.value = String(Math.round(view.scale / DEFAULT_SCALE * 100));
+  requestDraw();
+}
+$('zoom-level').addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+});
+$('zoom-level').addEventListener('blur', commitZoomInput);
 $('home').addEventListener('click', home);
 $('tools-open').addEventListener('click', () => $('tools-dialog').showModal());
 $('console-drawer-toggle').addEventListener('click', event => {
@@ -1863,6 +2116,8 @@ $('console-drawer-toggle').addEventListener('click', event => {
 let maximized = false;
 function maximizeMap(value) {
   maximized = value;
+  if (value) document.querySelector('.map-toolbar').prepend($('map-notices'));
+  else $('title-area').append($('map-notices'));
   document.body.classList.toggle('map-maximized', value);
   $('map-maximize').setAttribute('aria-label', value ? '元のレイアウトに戻す' : '全体表示');
   $('map-maximize').title = value ? '元のレイアウトに戻す' : '全体表示';
@@ -1876,9 +2131,19 @@ $('map-maximize').addEventListener('click', () => maximizeMap(!maximized));
 window.addEventListener('keydown', event => {
   if (event.key === 'Escape' && maximized) maximizeMap(false);
 });
+let wheelDelta = 0;
+let wheelTime = 0;
 canvas.addEventListener('wheel', event => {
   event.preventDefault();
-  zoom(Math.exp(-event.deltaY * .001), pointer(event));
+  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? height : 1);
+  if (event.timeStamp - wheelTime > 250 || Math.sign(delta) !== Math.sign(wheelDelta)) wheelDelta = 0;
+  wheelTime = event.timeStamp;
+  wheelDelta += delta;
+  while (Math.abs(wheelDelta) >= 80) {
+    const direction = Math.sign(wheelDelta);
+    stepZoom(-direction, pointer(event));
+    wheelDelta -= direction * 80;
+  }
 }, { passive: false });
 canvas.addEventListener('pointerdown', event => {
   if (event.pointerType === 'touch') {
@@ -1909,6 +2174,7 @@ canvas.addEventListener('pointerdown', event => {
   const object = !maximized && editable() && $('mode').value !== 'browse' && hit?.id === selectedId ? hit : null;
   drag = { id: event.pointerId, start: point, point, moved: false, object,
     candidate: object ? { ...object } : null, origin: raw };
+  startEdgeMotion();
   canvas.setPointerCapture(event.pointerId);
   if (event.pointerType === 'touch' && hit && editable()) {
     longPressTimer = setTimeout(() => {
@@ -1930,9 +2196,10 @@ canvas.addEventListener('pointermove', event => {
         const next = pinchState();
         if (pinch && pinch.distance > 0 && next.distance > 0) {
           const anchor = world(pinch.center);
-          view.scale = Math.max(.3, Math.min(40, view.scale * next.distance / pinch.distance));
+          view.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * next.distance / pinch.distance));
           view.x = anchor.x - (next.center.x - width / 2) / view.scale;
           view.y = anchor.y - (next.center.y - height / 2) / view.scale;
+          updateMapUrl();
         }
         pinch = next;
         requestDraw();
@@ -1949,11 +2216,7 @@ canvas.addEventListener('pointermove', event => {
     if (drag.moved) {
       markMapInteracting();
       if (drag.object) {
-        const raw = world(point);
-        const cell = snapCell(drag.object.x + raw.x - drag.origin.x, drag.object.y + raw.y - drag.origin.y);
-        drag.candidate = { ...drag.object, ...cell };
-        $('x').value = cell.x;
-        $('y').value = cell.y;
+        updateDragCandidate(point);
       } else {
         view.x -= (point.x - drag.point.x) / view.scale;
         view.y -= (point.y - drag.point.y) / view.scale;
@@ -2026,6 +2289,17 @@ canvas.addEventListener('pointercancel', event => {
   if (longPressPointerId === event.pointerId) longPressPointerId = null;
   const object = drag?.object;
   drag = null;
+  if (object) selectObject(object);
+  requestDraw();
+  settleMapInteraction();
+});
+canvas.addEventListener('lostpointercapture', event => {
+  if (drag?.id !== event.pointerId) return;
+  const object = drag.object;
+  drag = null;
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+  touchPoints.delete(event.pointerId);
   if (object) selectObject(object);
   requestDraw();
   settleMapInteraction();

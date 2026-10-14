@@ -6,7 +6,7 @@ import { emptyMap, addGuild, addMember, snapCell, validCell, footprint, terrain,
   addMembers, renameMember, renameGuild, orderedMembers, setMemberRank, setMemberRanks, territorySources,
   territoryContains, territoryBoundary, cellBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
   TYPES, WASTELAND, BASE, TURRETS, parseMapView, initialMapView, membersFor,
-  changeMembership, objectGuildId, deleteGuild } from './model.js';
+  changeMembership, objectGuildId, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MAX_SCALE } from './model.js';
 
 test('map outline is one closed jagged boundary around the valid parity grid', () => {
   const outlines = mapOutline();
@@ -76,13 +76,15 @@ test('replacing a singleton keeps its identity and validates with only itself ex
 });
 
 test('map links validate server, guild and scale and focus only the requested fortress', () => {
-  assert.deepEqual(parseMapView(''), { server: null, guild: null, scale: 14, code: null, revision: null });
-  assert.deepEqual(parseMapView('?server=1047&guild=ABC&scale=20'), { server: 'S1047', guild: 'ABC', scale: 20, code: null, revision: null });
+  assert.deepEqual(parseMapView(''), { server: null, guild: null, scale: 14, code: null, revision: null, x: null, y: null });
+  assert.deepEqual(parseMapView('?server=1047&guild=ABC&scale=20'), { server: 'S1047', guild: 'ABC', scale: 20, code: null, revision: null, x: null, y: null });
   assert.equal(parseMapView('?map=Abc123_-xyzQ&guild=AbC&revision=12').revision, 12);
   assert.equal(parseMapView('?map=Abc123_-xyzQ&guild=AbC').code, 'Abc123_-xyzQ');
   assert.equal(parseMapView('?server=S1063&scale=0.3').scale, .3);
   assert.equal(parseMapView('?scale=40').scale, 40);
-  for (const query of ['?server=', '?server=foo', '?server=1&server=2', '?guild=AB', '?guild=日本語', '?scale=', '?scale=NaN', '?scale=0.2', '?scale=41', '?hash=abc', '?map=abc', '?map=Abc123_-xyzQ&server=1063', '?map=Abc123_-xyzQ&map=Abc123_-xyzQ', '?revision=0', '?revision=-1', '?revision=1&revision=2', '?revision=1000000000']) {
+  assert.equal(parseMapView('?scale=42').scale, MAX_SCALE);
+  assert.equal(MAX_SCALE / DEFAULT_SCALE * 100, 300);
+  for (const query of ['?server=', '?server=foo', '?server=1&server=2', '?guild=AB', '?guild=日本語', '?scale=', '?scale=NaN', '?scale=0.2', '?scale=42.1', '?hash=abc', '?map=abc', '?map=Abc123_-xyzQ&server=1063', '?map=Abc123_-xyzQ&map=Abc123_-xyzQ', '?revision=0', '?revision=-1', '?revision=1&revision=2', '?revision=1000000000']) {
     assert.throws(() => parseMapView(query), /URL/);
   }
   const state = fixture();
@@ -97,6 +99,68 @@ test('map links validate server, guild and scale and focus only the requested fo
   assert.deepEqual(initialMapView(state, 'XYZ', 14), { x: 256, y: 512, scale: 14 });
   state.facilities = [];
   assert.deepEqual(initialMapView(state, 'ABC', 14), { x: 256, y: 512, scale: 14 });
+});
+
+test('map links accept a coordinate pair that overrides fortress focus without requiring cell parity', () => {
+  const state = fixture();
+  const link = parseMapView('?x=0&y=1023&scale=42');
+  assert.deepEqual(initialMapView(state, 'ABC', link.scale, link.x, link.y), { x: 0, y: 1023, scale: 42 });
+  const fractional = parseMapView('?x=123.5&y=456.25');
+  assert.deepEqual(initialMapView(state, null, fractional.scale, fractional.x, fractional.y),
+    { x: 123.5, y: 456.25, scale: 14 });
+  for (const query of ['?x=1', '?y=1', '?x=&y=1', '?x=1&y=', '?x=NaN&y=1', '?x=1&y=Infinity',
+    '?x=-1&y=1', '?x=512&y=1', '?x=1&y=1024', '?x=1&y=-1', '?x=1&x=2&y=3', '?x=1&y=2&y=3']) {
+    assert.throws(() => parseMapView(query), /URL/);
+  }
+});
+
+test('member reordering preserves other ranks, guilds, IDs, placements and saved order', () => {
+  const state = fixture();
+  addGuild(state, 'other', 'OTH');
+  addMember(state, 'g1', 'a', 'A', 3);
+  addMember(state, 'other', 'other-member', 'Other', 3);
+  addMember(state, 'g1', 'leader', 'Leader', 5);
+  addMember(state, 'g1', 'b', 'B', 3);
+  addMember(state, 'g1', 'c', 'C', 3);
+  placeObject(state, facility('s', 'shelter', 214, 452, { playerId: 'c' }));
+  const original = structuredClone(state);
+  const history = new EditHistory(state);
+  history.record(state);
+  reorderMember(state, 'g1', 'c', 'a');
+  assert.deepEqual(membersFor(state, 'g1').filter(member => member.rank === 3).map(member => member.id), ['c', 'a', 'b']);
+  for (const player of original.players.filter(player => !['a', 'b', 'c'].includes(player.id))) {
+    assert.deepEqual(state.players[original.players.findIndex(entry => entry.id === player.id)], player);
+  }
+  assert.deepEqual(state.facilities, original.facilities);
+  assert.deepEqual(importMap(state).players, state.players);
+  assert.deepEqual(history.undo(state), original);
+  reorderMember(state, 'g1', 'c');
+  assert.deepEqual(membersFor(state, 'g1').filter(member => member.rank === 3).map(member => member.id), ['a', 'b', 'c']);
+  const unchanged = structuredClone(state);
+  reorderMember(state, 'g1', 'a', 'a');
+  assert.deepEqual(state, unchanged);
+  for (const [guildId, id, target] of [['g1', 'a', 'leader'], ['g1', 'a', 'other-member'], ['other', 'a', null], ['g1', 'missing', null]]) {
+    assert.throws(() => reorderMember(state, guildId, id, target), /メンバー|所属/);
+    assert.deepEqual(state, unchanged);
+  }
+  addMember(state, null, 'unaffiliated-a', 'Unattached A');
+  addMember(state, null, 'unaffiliated-b', 'Unattached B');
+  reorderMember(state, null, 'unaffiliated-b', 'unaffiliated-a');
+  assert.deepEqual(membersFor(state, null).map(member => member.id), ['unaffiliated-b', 'unaffiliated-a']);
+});
+
+test('edge scrolling is directional, accelerates near boundaries and stops away from the viewport', () => {
+  assert.equal(edgeVelocity(150, 300), 0);
+  assert.equal(edgeVelocity(56, 300), 0);
+  assert.equal(edgeVelocity(244, 300), 0);
+  assert.equal(edgeVelocity(0, 300), -360);
+  assert.equal(edgeVelocity(300, 300), 360);
+  assert.equal(edgeVelocity(28, 300), -90);
+  assert.equal(edgeVelocity(272, 300), 90);
+  assert.equal(edgeVelocity(-57, 300), 0);
+  assert.equal(edgeVelocity(357, 300), 0);
+  assert.equal(edgeVelocity(5, 0), 0);
+  assert.equal(edgeVelocity(50, 100), 0);
 });
 
 test('bulk registration is atomic and rename preserves shelter identity and coordinates', () => {
