@@ -1,8 +1,10 @@
-const CACHE = 'pns-map-editor-v1';
-const ASSETS = ['./', './index.html', './style.css', './app.js', './model.js', './manifest.webmanifest', './icon.svg'];
+const CACHE = 'pns-map-editor-v75';
+const ASSETS = ['./', './index.html', './style.css', './app.js', './model.js', './persistence.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(
+    ASSETS.map(asset => new Request(new URL(asset, self.registration.scope), { cache: 'reload' })),
+  )).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(
