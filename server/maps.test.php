@@ -42,6 +42,11 @@ $users = [['sub' => '123456', 'id' => $userId, 'display_name' => 'Builder',
     'admin' => false, 'suspended' => false, 'registered_at' => null]];
 $usersPath = $root . DIRECTORY_SEPARATOR . 'users.json';
 expect(file_put_contents($usersPath, json_encode($users, JSON_THROW_ON_ERROR)) !== false, 'Users fixture failed.');
+updateAccess($root, static function (array &$access) use ($userId): void {
+    foreach (['S1063', 'S9999', 'S9998'] as $server) {
+        $access['permissions'][$userId][$server] = ['editor' => true, 'approver' => false];
+    }
+});
 try {
     $map = emptySharedMap();
     $map['version'] = 1;
@@ -251,7 +256,7 @@ try {
     if (is_dir($maps)) {
         expect(rmdir($maps), 'Maps directory cleanup failed.');
     }
-    foreach (['users.json', 'users.lock', 'maps.lock'] as $name) {
+    foreach (['users.json', 'users.lock', 'maps.lock', 'access.json'] as $name) {
         $path = $root . DIRECTORY_SEPARATOR . $name;
         if (file_exists($path)) {
             expect(unlink($path), 'Fixture cleanup failed.');

@@ -4,7 +4,7 @@ import { EditHistory } from './persistence.js';
 import { emptyMap, addGuild, addMember, snapCell, validCell, footprint, terrain,
   objectAt, placeObject, placementError, territoryGuilds, importMap,
   addMembers, renameMember, renameGuild, orderedMembers, setMemberRank, setMemberRanks, territorySources,
-  territoryContains, territoryBoundary, cellBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
+  territoryContains, territoryBoundary, territorySourceBoundaries, territoryGuildBoundaries, cellBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
   TYPES, WASTELAND, BASE, TURRETS, parseMapView, initialMapView, membersFor,
   changeMembership, objectGuildId, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MAX_SCALE } from './model.js';
 
@@ -57,6 +57,44 @@ test('selected source boundary excludes terrain and mountains but ignores other 
   assert.ok(clipped.length);
   assert.ok(clipped.every(edge => edge.every(([, y]) => y > 539)));
   assert.ok(clipped.some(edge => edge.some(([x, y]) => x === 256 && y === 551)));
+});
+
+test('guild territory boundary unions its active sources without carving mountains', () => {
+  const state = fixture();
+  const fortress = facility('f', 'fortress', 214, 452);
+  placeObject(state, fortress);
+  const beforeMountain = territoryGuildBoundaries(state).get('g1');
+  assert.ok(beforeMountain.length > 0);
+  assert.equal(territoryGuildBoundaries(state).has('g2'), false);
+
+  placeObject(state, { id: 'mount', type: 'mountain', size: 2, x: 210, y: 452 });
+  assert.deepEqual(territoryGuildBoundaries(state).get('g1'), beforeMountain);
+
+  const outpost = facility('o', 'outpost1', 224, 452, { size: 1 });
+  placeObject(state, outpost);
+  const withOutpost = territoryGuildBoundaries(state).get('g1');
+  assert.ok(withOutpost.length > 0);
+  assert.notDeepEqual(withOutpost, beforeMountain);
+
+  addGuild(state, 'g2', '他ギルド');
+  placeObject(state, facility('other-f', 'fortress', 300, 450, { guildId: 'g2' }));
+  assert.ok(territoryGuildBoundaries(state).has('g2'));
+});
+
+test('individual range boundaries are available for every active fortress and connected outpost', () => {
+  const state = fixture();
+  const fortress = facility('f', 'fortress', 214, 452);
+  const outpost = facility('o', 'outpost1', 224, 452, { size: 1 });
+  const detached = facility('d', 'outpost2', 300, 450, { size: 1 });
+  placeObject(state, fortress);
+  placeObject(state, outpost);
+  placeObject(state, detached);
+  const boundaries = territorySourceBoundaries(state);
+  assert.deepEqual([...boundaries.keys()], ['f', 'o']);
+  assert.deepEqual(boundaries.get('f'), territoryBoundary(state, fortress));
+  assert.deepEqual(boundaries.get('o'), territoryBoundary(state, outpost));
+  assert.ok(boundaries.get('o').length > 0);
+  assert.equal(boundaries.has('d'), false);
 });
 
 test('replacing a singleton keeps its identity and validates with only itself excluded', () => {
@@ -300,6 +338,14 @@ test('observed western boundary cells and west turret footprint match the game',
   const turretCells = footprint({ x, y, size: 2 }).map(({ x, y }) => `${x},${y}`).sort();
   assert.deepEqual(turretCells, ['245,511', '247,511', '246,510', '246,512'].sort());
   for (const [x, y] of outerCells) assert.ok(!turretCells.includes(`${x},${y}`));
+});
+
+test('every complete turret footprint is inside the lab terrain region', () => {
+  for (const [x, y] of TURRETS) {
+    for (const cell of footprint({ x, y, size: 2 })) {
+      assert.equal(terrain(cell.x, cell.y), 'lab', `turret cell ${cell.x},${cell.y}`);
+    }
+  }
 });
 
 function fixture() {

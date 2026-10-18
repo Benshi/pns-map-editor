@@ -13,6 +13,7 @@ set_error_handler(static function (int $severity, string $message): never {
 });
 require __DIR__ . '/server/auth.php';
 require __DIR__ . '/server/maps.php';
+require __DIR__ . '/server/account.php';
 
 function jsonResponse(array $body, int $status = 200): never
 {
@@ -34,8 +35,26 @@ function page(string $title, string $content, int $status = 200): never
     echo '<!doctype html><html lang="ja"><meta charset="utf-8">'
         . '<meta name="viewport" content="width=device-width,initial-scale=1">'
         . '<title>' . escape($title) . '</title>'
-        . '<style>body{font-family:sans-serif;max-width:45rem;margin:2rem auto;padding:0 1rem;line-height:1.8}'
-        . 'button{font:inherit;padding:.6rem}li{margin:.5rem 0}</style>'
+        . '<style>:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:system-ui,sans-serif;max-width:64rem;margin:0 auto;padding:1rem;line-height:1.7;background:#14251d;color:#edf2e9}'
+        . 'a{color:#a8dfff}h1{font-size:1.5rem}h2{font-size:1.2rem;color:#d5e9ad}h3{font-size:1.05rem}p{overflow-wrap:anywhere}'
+        . 'section,article,.notice{padding:1rem;margin:1rem 0;border:1px solid #526b57;border-radius:.6rem;background:#1c3226}section{scroll-margin-top:8rem}'
+        . 'article{background:#243d2e}nav{display:flex;align-items:center;flex-wrap:wrap;gap:.7rem;margin:.7rem 0}'
+        . '.account-nav{position:sticky;top:0;z-index:1;background:#14251df5;padding:.6rem 0;border-bottom:1px solid #526b57}'
+        . 'label{display:grid;gap:.3rem;margin:.6rem 0}input,textarea,select,button{font:inherit;border:1px solid #819977;border-radius:.3rem;padding:.6rem;background:#14251d;color:inherit;max-width:100%}'
+        . 'input,textarea,select{width:100%}textarea{resize:vertical}button,.primary{background:#385744;cursor:pointer}button{margin:.3rem 0}'
+        . '.primary{padding:.5rem .8rem;border-radius:.3rem;color:#fff;text-decoration:none}.badge{display:inline-block;padding:0 .4rem;background:#385744;border-radius:.3rem}'
+        . '.message{white-space:pre-wrap;border-left:3px solid #819977;padding-left:.7rem}.check{display:inline-flex;align-items:center;margin-right:1rem}.check input{width:auto}'
+        . '.filters{display:flex;flex-wrap:wrap;gap:.6rem;align-items:end}.filters label{flex:1 1 10rem}.danger{border-color:#df9990}summary{cursor:pointer;padding:.5rem}'
+        . 'body:has(.account-shell){height:100dvh;display:flex;flex-direction:column;overflow:hidden;padding:.6rem 1rem}'
+        . 'body:has(.account-shell)>h1{font-size:1.1rem;margin:0;flex:none}.account-shell{display:flex;flex-direction:column;min-height:0;flex:1}'
+        . '.account-nav{position:static;flex:none;margin:.2rem 0;padding:.2rem 0;gap:.5rem}.account-nav form{margin-left:auto}.account-nav button{padding:.35rem .6rem}'
+        . '.account-identity{margin:.25rem 0;font-size:.9rem;flex:none}.account-tabs{display:flex;flex-wrap:nowrap;gap:.35rem;flex:none;margin:.3rem 0}'
+        . '.account-tabs a{flex:1;text-align:center;text-decoration:none;padding:.4rem .2rem;border:1px solid #526b57;border-radius:.3rem;font-size:.9rem}'
+        . '[aria-current="page"]{background:#385744;color:#fff;font-weight:bold}.account-content{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:.1rem .2rem .5rem}'
+        . '.account-content section{margin:.4rem 0;padding:.6rem}.account-content h2{margin:.2rem 0}.account-content p{margin:.4rem 0}.account-content article{margin:.4rem 0;padding:.2rem .4rem}'
+        . '.account-content .admin-tabs{position:sticky;top:0;background:#14251d;z-index:1}.filter-options{border-bottom:1px solid #526b57}.account-content .notice{margin:.4rem 0;padding:.5rem}'
+        . '.account-content label{line-height:1.4;margin:.45rem 0;gap:.2rem}.account-content input,.account-content textarea,.account-content select{padding:.45rem}'
+        . ':focus-visible{outline:3px solid #a8dfff;outline-offset:2px}@media(max-width:600px){body{padding:.7rem}.account-nav{font-size:.9rem}section,article{padding:.7rem}button{min-height:44px}}</style>'
         . '<h1>' . escape($title) . '</h1>' . $content . '</html>';
     exit;
 }
@@ -160,15 +179,21 @@ try {
             break;
         }
     }
+    $access = readAccess($private);
         if ($route === '/session' || $route === '/maps' || str_starts_with($route, '/maps/')) {
             try {
-                $admin = $currentUser !== null && isAdmin($currentUser, $config);
-                $editor = $currentUser !== null && canEdit($currentUser);
+                $admin = $currentUser !== null && !$currentUser['suspended'] && isAdmin($currentUser, $config);
                 if ($route === '/session' && $method === 'GET') {
+                    $permissions = $currentUser === null ? [] : ($access['permissions'][$currentUser['id']] ?? []);
+                    $editableServers = $currentUser !== null && canEdit($currentUser)
+                        ? array_keys(array_filter($permissions, static fn(array $roles): bool => $roles['editor'])) : [];
                     jsonResponse(['user' => $currentUser === null ? null : [
                         'id' => $currentUser['id'], 'display_name' => $currentUser['display_name'],
-                        'can_edit' => canEdit($currentUser), 'admin' => $admin, 'suspended' => $currentUser['suspended'],
-                    ], 'csrf' => $_SESSION['csrf']]);
+                        'can_edit' => canEdit($currentUser) && ($admin || $editableServers !== []),
+                        'editable_servers' => $editableServers,
+                        'admin' => $admin, 'suspended' => $currentUser['suspended'],
+                    ], 'unread_count' => $currentUser === null ? 0 : unreadAccessCount($access, $currentUser['id']),
+                        'csrf' => $_SESSION['csrf']]);
                 }
                 $servers = registeredMapServers($private, $config['servers']);
                 $requested = $_GET['server'] ?? null;
@@ -183,14 +208,11 @@ try {
                     }
                     $requested = $resolved;
                 }
-                if (!$admin && !$editor && $provided === null) {
-                    jsonResponse(['error' => '閲覧にはmapを含む共有URLが必要です。'], 403);
-                }
                 if ($route === '/maps' && $method === 'GET' && $admin) {
                     jsonResponse(['servers' => $servers, 'server' => $requested]);
                 }
                 if (!$admin && (!is_string($requested) || !preg_match('/^S[0-9]{1,10}$/D', $requested))) {
-                    jsonResponse(['error' => 'サーバー番号を指定してください。'], 400);
+                    jsonResponse(['error' => '閲覧には共有URL、編集には対象サーバーの承認が必要です。'], 403);
                 }
                 if ($route === '/maps' && $method === 'GET') {
                     $match = [null, $requested];
@@ -199,6 +221,7 @@ try {
                     jsonResponse(['error' => 'サーバーが見つかりません。'], 404);
                 }
                 $server = $match[1];
+                $editor = canEditServer($currentUser, $server, $config, $access);
                 if (!$admin && $server !== $requested) {
                     jsonResponse(['error' => '指定サーバー以外は閲覧できません。'], 403);
                 }
@@ -206,7 +229,8 @@ try {
                 $directory = $private . DIRECTORY_SEPARATOR . 'maps' . DIRECTORY_SEPARATOR . $server;
                 $code = $registered ? mapShareCode(($admin || $editor) ? mapDirectory($private, $server) : $directory,
                     $admin || $editor) : null;
-                if (!$admin && !$editor && (!$registered || $code === null || !hash_equals($code, $provided))) {
+                if (!$admin && !$editor && (!$registered || $code === null
+                    || !is_string($provided) || !hash_equals($code, $provided))) {
                     jsonResponse(['error' => '共有コードが無効です。共有URLを確認してください。'], 403);
                 }
                 if ($route === '/maps' && $method === 'GET') {
@@ -237,8 +261,8 @@ try {
                     }
                 }
                 if ($method === 'POST' && ($operation === '' || $operation === 'restore')) {
-                    if ($currentUser === null || !canEdit($currentUser)) {
-                        jsonResponse(['error' => '編集するにはログインと表示名登録が必要です。編集停止中は保存できません。'], 403);
+                    if (!$editor) {
+                        jsonResponse(['error' => '編集にはGoogleログイン・表示名登録と対象サーバーの承認が必要です。編集停止中は保存できません。'], 403);
                     }
                     if (!is_string($_POST['csrf'] ?? null) || !hash_equals($_SESSION['csrf'], $_POST['csrf'])) {
                         jsonResponse(['error' => 'ログイン状態を確認できません。ページを開き直してください。'], 403);
@@ -260,7 +284,7 @@ try {
                     }
                     $saved = saveSharedMap($private, $server, $input['base_revision'],
                         $input['map'] ?? null, $currentUser['id'],
-                        $operation === 'restore' ? $input['restore_revision'] : null);
+                        $operation === 'restore' ? $input['restore_revision'] : null, $config);
                     jsonResponse($saved + ['code' => mapShareCode(mapDirectory($private, $server), true)]);
                 }
                 header('Allow: GET, POST');
@@ -271,6 +295,32 @@ try {
                 jsonResponse(['error' => $error->getMessage()], 400);
             }
         }
+    if (in_array($route, ['/account/request', '/admin/decision', '/admin/roles', '/account/read'], true)) {
+        if ($method !== 'POST') {
+            header('Allow: POST');
+            page('操作に対応していません', '<p>画面のボタンから操作してください。</p>', 405);
+        }
+        if ($currentUser === null || !is_string($_POST['csrf'] ?? null)
+            || !hash_equals($_SESSION['csrf'], $_POST['csrf'])) {
+            page('操作を確認できません', '<p>ログイン画面を開き直してください。</p>', 403);
+        }
+        try {
+            $action = ['/account/request' => 'request', '/admin/decision' => 'decision',
+                '/admin/roles' => 'roles', '/account/read' => 'read'][$route];
+            changeAccess($private, $currentUser['id'], $action, $_POST, $config);
+            $_SESSION['account_notice'] = '操作を保存しました。';
+        } catch (InvalidArgumentException $error) {
+            page('操作を保存できません', '<p>' . escape($error->getMessage()) . '</p><p><a href="'
+                . escape($config['base_url']) . '">利用者設定に戻る</a></p>', 400);
+        }
+        $destination = match ($route) {
+            '/admin/roles' => '?view=admin&tab=users',
+            '/admin/decision' => '?view=admin',
+            '/account/read' => '?tab=notifications',
+            default => '?tab=requests',
+        };
+        redirect($config['base_url'] . $destination);
+    }
     if ($route === '/account/name' || $route === '/admin/suspension') {
         if ($method !== 'POST') {
             header('Allow: POST');
@@ -298,7 +348,7 @@ try {
             page('変更を保存できません', '<p>' . escape($error->getMessage())
                 . '</p><p><a href="' . escape($config['base_url']) . '">設定画面へ戻る</a></p>', 400);
         }
-        redirect($config['base_url']);
+        redirect($config['base_url'] . ($route === '/admin/suspension' ? '?view=admin&tab=users' : '?tab=profile'));
     }
     if ($route !== '' && $route !== '/') {
         page('ページがありません', '<p>指定された操作には対応していません。</p>', 404);
@@ -310,63 +360,14 @@ try {
     if (array_key_exists('return', $_GET)) {
         $query = $_GET['return'];
         if (!is_string($query) || strlen($query) > 2048 || preg_match('/[\x00-\x1f\x7f#]/', $query)) {
-            page('戻り先を確認できません', '<p>マップのログイン・利用者設定から開き直してください。</p>', 400);
+            page('戻り先を確認できません', '<p>マップの「ログイン」または「アカウント」から開き直してください。</p>', 400);
         }
         $_SESSION['map_return_query'] = $query;
     }
     $mapQuery = $_SESSION['map_return_query'] ?? '';
     $mapReturn = dirname($config['base_url']) . '/index.html'
         . ($mapQuery === '' ? '' : '?' . $mapQuery);
-    $backLink = '<p><a href="' . escape($mapReturn) . '">マップに戻る</a></p>';
-    $csrf = escape($_SESSION['csrf']);
-    if ($currentUser === null) {
-        page('P&S マップへのログイン', '<p>閲覧はログイン不要、編集はログインと表示名の登録が必要です。'
-            . 'Google のメールアドレスは要求・保存しません。</p>'
-            . '<form method="post" action="' . escape($config['base_url'] . '/auth/login') . '">'
-            . '<input type="hidden" name="csrf" value="' . $csrf . '">'
-            . '<button>Google でログイン</button></form>' . $backLink);
-    }
-    $content = '<p>識別名：' . escape($currentUser['id']) . '（変更できません）</p>';
-    if ($currentUser['suspended']) {
-        $content .= '<p>編集停止中です。表示名変更や再ログインでは解除されません。</p>';
-    } elseif (canEdit($currentUser)) {
-        $content .= '<p>編集者として登録済みです。</p>';
-    } else {
-        $content .= '<p>表示名を登録するまでは閲覧のみです。</p>';
-    }
-    $name = $currentUser['display_name'] ?? ($_SESSION['suggested_name'] ?? '');
-    $content .= '<form method="post" action="' . escape($config['base_url'] . '/account/name') . '">'
-        . '<input type="hidden" name="csrf" value="' . $csrf . '">'
-        . '<label>公開する表示名 <input name="name" maxlength="80" required value="' . escape($name) . '"></label>'
-        . '<p>同名は使用可能です。Google の名前を使いたくない場合は変更してください。'
-        . '確定した表示名は編集履歴に公開されます。</p><button>表示名を保存</button></form>';
-    if (isAdmin($currentUser, $config) && !$currentUser['suspended']) {
-        $content .= '<h2>管理者：編集停止の管理</h2>';
-        $content .= '<ul>';
-        foreach ($users as $user) {
-            $content .= '<li>' . escape($user['display_name'] ?? '表示名未登録') . ' · '
-                . escape($user['id']);
-            $content .= '<br>登録日時：' . ($user['registered_at'] === null ? ''
-                : escape((new DateTimeImmutable($user['registered_at']))
-                    ->setTimezone(new DateTimeZone('Asia/Tokyo'))->format('Y-m-d H:i:s')) . '（日本時間）');
-            if (isAdmin($user, $config)) {
-                $content .= '（管理者）';
-            } else {
-                $content .= $user['suspended'] ? '（編集停止中）' : '（編集停止なし）';
-                $content .= '<form method="post" action="' . escape($config['base_url'] . '/admin/suspension') . '">'
-                    . '<input type="hidden" name="csrf" value="' . $csrf . '">'
-                    . '<input type="hidden" name="target" value="' . escape($user['id']) . '">'
-                    . '<input type="hidden" name="stop" value="' . ($user['suspended'] ? '0' : '1') . '">'
-                    . '<button>' . ($user['suspended'] ? '編集停止を解除' : '編集を停止') . '</button></form>';
-            }
-            $content .= '</li>';
-        }
-        $content .= '</ul>';
-    }
-    $content .= $backLink
-        . '<form method="post" action="' . escape($config['base_url'] . '/auth/logout') . '">'
-        . '<input type="hidden" name="csrf" value="' . $csrf . '"><button>ログアウト</button></form>';
-    page('ログイン確認', $content);
+    renderAccount($private, $config, $currentUser, $users, $access, $mapReturn);
 } catch (Throwable $error) {
     $reference = bin2hex(random_bytes(6));
     error_log('pns auth [' . $reference . ']: ' . $error->getMessage());

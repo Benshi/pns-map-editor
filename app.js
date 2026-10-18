@@ -1,7 +1,7 @@
 import { TYPES, RANKS, shelterColor, rankName, orderedMembers, setMemberRanks, territorySources, territoryRadius, territoryContains, territoryGuilds,
   LAB, WASTELAND, TURRETS, emptyMap, addGuild, addMembers, renameGuild, renameMember, snapCell, validCell,
-  footprint, cellKey, terrain, objectAt, placeObject, placementError, importMap, parseMapView, initialMapView,
-  territoryBoundary, cellBoundary, placedFacility, mapOutline, membersFor, objectGuildId,
+  footprint, cellKey, terrain, inPolygon, objectAt, placeObject, placementError, importMap, parseMapView, initialMapView,
+  territoryBoundary, territorySourceBoundaries, territoryGuildBoundaries, cellBoundary, placedFacility, mapOutline, membersFor, objectGuildId,
   changeMembership, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MIN_SCALE, MAX_SCALE } from './model.js';
 import { EditHistory, sharedMap, apiRequest } from './persistence.js';
 
@@ -18,6 +18,8 @@ let outlineBitmapPromise = null;
 let mapInteractionTimer = null;
 let mapInteracting = false;
 let state = emptyMap();
+let sourceBoundaryCacheKey = '';
+let sourceBoundaryCache = new Map();
 const localMode = new URLSearchParams(location.search).get('storage') === 'local';
 let serverId = localMode ? 'S1063' : '';
 let serverCode = null;
@@ -25,6 +27,7 @@ let revision = 0;
 let latestRevision = 0;
 let revisionInfo = null;
 let viewingPast = false;
+let readOnlyMode = false;
 let loaded = localMode;
 let viewInitialized = false;
 let busy = false;
@@ -32,9 +35,12 @@ let session = { user: null, csrf: '' };
 let preferences = {};
 let guildOrder = 'registration';
 let category = 'mountain';
+let lastNonBrowseMode = 'place';
 const history = new EditHistory(state);
 let selectedId = '';
 let hover = null;
+let territoryPreviewGuildId = '';
+let territoryPinnedGuildId = '';
 let placementPreviewActive = true;
 let relocationPreviewActive = false;
 const rankMemberIds = new Set();
@@ -67,6 +73,10 @@ let width = 0;
 let height = 0;
 let frame = null;
 const view = { x: 256, y: 512, scale: DEFAULT_SCALE };
+function clampViewCenter() {
+  view.x = Math.max(0, Math.min(511, view.x));
+  view.y = Math.max(0, Math.min(1023, view.y));
+}
 
 function status(message, error = false) {
   $('status').textContent = message;
@@ -104,7 +114,10 @@ const canPlaceShelter = () => !!state.players.find(player => player.id === $('me
 const objects = () => [...state.facilities, ...state.mountains];
 const selected = () => objects().find(o => o.id === selectedId);
 const newId = () => crypto.randomUUID();
-const editable = () => loaded && !busy && !viewingPast && (localMode || session.user?.can_edit);
+const hasServerEditPermission = () => !!session.user?.can_edit
+  && (session.user.admin || session.user.editable_servers?.includes(serverId));
+const canEditMap = () => loaded && !viewingPast && (localMode || hasServerEditPermission());
+const editable = () => canEditMap() && !busy && !readOnlyMode;
 
 function preferenceKey() { return `${session.user?.id ?? 'visitor'}:${serverId}`; }
 function applyPreference() {
@@ -125,20 +138,53 @@ function rememberGuild() {
 function updateAccountLinks() {
   for (const link of document.querySelectorAll('[data-account-link]')) {
     link.href = `./api.php?${new URLSearchParams({ return: location.search.slice(1) })}`;
+    link.textContent = session.user ? 'アカウント・ログアウト' : 'ログイン';
+  }
+  const notification = $('account-notifications');
+  notification.hidden = localMode || !session.user;
+  notification.href = `./api.php?${new URLSearchParams({ return: location.search.slice(1), tab: 'notifications' })}`;
+  notification.textContent = `🔔 通知 ${session.unread_count ?? 0}`;
+  notification.setAttribute('aria-label', `利用者設定の通知（未読${session.unread_count ?? 0}件）`);
+}
+
+let refreshingSession = false;
+let sessionRefreshFailed = false;
+async function refreshAccountSession() {
+  if (localMode || document.hidden || busy || refreshingSession) return;
+  refreshingSession = true;
+  try {
+    session = await apiRequest('/session');
+    sessionRefreshFailed = false;
+    refreshPersistence();
+    requestDraw();
+  } catch (error) {
+    if (!sessionRefreshFailed) status(`通知・編集権限の更新に失敗しました: ${error.message}`, true);
+    sessionRefreshFailed = true;
+  } finally {
+    refreshingSession = false;
   }
 }
+setInterval(refreshAccountSession, 60000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshAccountSession();
+});
+window.addEventListener('focus', refreshAccountSession);
 function refreshPersistence() {
   updateAccountLinks();
-  const canEdit = loaded && !viewingPast && (localMode || session.user?.can_edit);
+  const canEdit = canEditMap() && !readOnlyMode;
   $('map-console').hidden = !canEdit;
   for (const id of ['save', 'undo', 'redo', 'guild-manage', 'member-manage', 'move', 'delete']) $(id).hidden = !canEdit;
+  $('access-mode-toggle').hidden = !canEditMap();
+  $('access-mode-toggle').disabled = busy;
+  $('access-mode-toggle').textContent = readOnlyMode ? '編集モードに戻る' : '閲覧専用モードに切り替え';
+  $('access-mode-toggle').setAttribute('aria-pressed', String(readOnlyMode));
   const dirty = history.dirty(state);
   const info = revisionInfo?.saved_at ? ` / ${new Date(revisionInfo.saved_at).toLocaleString()} / ${revisionInfo.author.display_name} · ${revisionInfo.author.id}` : '';
   const mapLabel = serverId ? `${serverId} 第${revision}版` : 'サーバー未指定';
   $('save-state').textContent = `${localMode ? '端末内編集' : `${mapLabel}${info}`}${viewingPast ? '（過去版・閲覧のみ）' : ''} / ${dirty ? '未保存' : '変更なし'}${busy ? ' / 通信中' : ''}`;
   $('save-details').textContent = $('save-state').textContent;
   $('save-state').title = $('save-state').textContent;
-  $('save-state').textContent = `${localMode ? '端末内' : mapLabel} / ${viewingPast ? '過去版' : canEdit ? dirty ? '未保存' : '変更なし' : '閲覧のみ'}${busy ? ' / 通信中' : ''}`;
+  $('save-state').textContent = `${localMode ? '端末内' : mapLabel} / ${viewingPast ? '過去版' : readOnlyMode ? '閲覧専用' : canEdit ? dirty ? '未保存' : '変更なし' : '閲覧のみ'}${busy ? ' / 通信中' : ''}`;
   $('save-state').classList.toggle('dirty', dirty);
   $('save').classList.toggle('dirty', dirty);
   $('save').disabled = !editable() || (!dirty && (localMode || revision !== 0));
@@ -152,7 +198,7 @@ function refreshPersistence() {
     button.disabled = busy || localMode || !loaded;
   }
   $('revision-view').disabled = busy || localMode || !$('history').value;
-  $('revision-restore').disabled = busy || localMode || !session.user?.can_edit || !$('history').value;
+  $('revision-restore').disabled = busy || localMode || !editable() || !$('history').value;
   $('history-load').disabled = busy || localMode || !loaded;
   $('import').disabled = !editable();
   for (const selector of ['#guild-form button[type="submit"]', '#member-form button', '#member-name-form button[type="submit"]', '#position-form button[type="submit"]']) {
@@ -250,15 +296,17 @@ function refresh() {
   const shelters = memberShelters();
   const members = membersFor(state, current?.id ?? null);
   $('member').replaceChildren(option('', 'メンバー未選択'));
+  const memberQuery = $('member-filter').value.trim().toLocaleLowerCase();
   for (const rank of RANKS) {
     const groupMembers = members.filter(m => (m.rank ?? null) === rank);
-    const matches = groupMembers.filter(m => m.name.toLocaleLowerCase()
-      .includes($('member-filter').value.trim().toLocaleLowerCase()));
+    const matches = groupMembers.filter(m => m.name.toLocaleLowerCase().includes(memberQuery)
+      || m.id === memberId);
     const group = document.createElement('optgroup');
     group.label = memberGroupLabel(rank, groupMembers, shelters);
     group.replaceChildren(...matches.map(m => {
       const placed = shelters.has(m.id);
-      const entry = option(m.id, `${m.name}（${placed ? '配置済み' : '未配置'}）`);
+      const outsideFilter = memberQuery && !m.name.toLocaleLowerCase().includes(memberQuery);
+      const entry = option(m.id, `${m.name}（${placed ? '配置済み' : '未配置'}${outsideFilter ? '・検索結果外、選択中' : ''}）`);
       entry.className = placed ? 'member-placed' : 'member-unplaced';
       return entry;
     }));
@@ -502,13 +550,17 @@ function cancelMemberReorder() {
   reorderSelectedId = '';
   renderMemberList();
 }
+function setMemberRegistration(open) {
+  $('member-registration').hidden = !open;
+  $('member-register').setAttribute('aria-expanded', String(open));
+  $('member-register').textContent = open ? '登録フォームを閉じる' : 'プレイヤー登録';
+}
 $('member-reorder').addEventListener('click', () => {
   if (!editable()) return status('並び替えには編集権限が必要です。', true);
   memberOrderDraft = { players: structuredClone(state.players) };
   reorderSelectedId = '';
   $('member-dialog-filter').value = '';
-  $('member-registration').hidden = true;
-  $('member-register').setAttribute('aria-expanded', 'false');
+  setMemberRegistration(false);
   rankMemberIds.clear();
   renderMemberList();
 });
@@ -696,8 +748,7 @@ $('member-form').addEventListener('submit', event => {
   if (success) {
     $('member-names').value = '';
     memberOpenRanks.add(String(rank ?? 'unset'));
-    $('member-registration').hidden = true;
-    $('member-register').setAttribute('aria-expanded', 'false');
+    setMemberRegistration(false);
     renderMemberList();
   }
 });
@@ -749,8 +800,7 @@ function openMemberManagement() {
   memberOpenRanks.clear();
   const firstRank = RANKS.find(rank => managementMembers().some(member => (member.rank ?? null) === rank));
   if (firstRank !== undefined) memberOpenRanks.add(String(firstRank ?? 'unset'));
-  $('member-registration').hidden = true;
-  $('member-register').setAttribute('aria-expanded', 'false');
+  setMemberRegistration(false);
   renderMemberList();
   $('member-dialog').querySelector('.dialog-status').textContent = '';
   $('member-dialog').showModal();
@@ -844,16 +894,15 @@ $('member-guild').addEventListener('change', () => {
   const firstRank = RANKS.find(rank => managementMembers().some(member => (member.rank ?? null) === rank));
   if (firstRank !== undefined) memberOpenRanks.add(String(firstRank ?? 'unset'));
   $('member-dialog-filter').value = '';
-  $('member-registration').hidden = true;
-  $('member-register').setAttribute('aria-expanded', 'false');
+  setMemberRegistration(false);
   $('member-names').value = '';
   $('member-dialog').querySelector('.dialog-status').textContent = '';
   renderMemberList();
 });
 $('member-register').addEventListener('click', () => {
-  $('member-registration').hidden = !$('member-registration').hidden;
-  $('member-register').setAttribute('aria-expanded', String(!$('member-registration').hidden));
-  if (!$('member-registration').hidden) $('member-names').focus();
+  const open = $('member-registration').hidden;
+  setMemberRegistration(open);
+  if (open) $('member-names').focus();
 });
 $('guild-members-manage').addEventListener('click', () => {
   if ($('guild-name').value.length) {
@@ -938,6 +987,7 @@ $('guild').addEventListener('change', () => {
   const fortress = state.facilities.find(o => o.type === 'fortress' && o.guildId === $('guild').value);
   if (fortress) {
     Object.assign(view, { x: fortress.x, y: fortress.y, scale: DEFAULT_SCALE });
+    clampViewCenter();
     updateMapUrl();
     requestDraw();
   }
@@ -968,6 +1018,7 @@ $('mode').addEventListener('change', () => {
     enterBrowseMode();
     return;
   }
+  lastNonBrowseMode = $('mode').value;
   placementPreviewActive = $('mode').value === 'place';
   relocationPreviewActive = false;
   hover = null;
@@ -1034,6 +1085,7 @@ $('position-form').addEventListener('submit', event => {
 $('go').addEventListener('click', () => {
   try {
     Object.assign(view, coordinates());
+    clampViewCenter();
     requestDraw();
   } catch (error) { status(error.message, true); }
 });
@@ -1068,7 +1120,10 @@ function selectObject(object, center = false) {
     $('type').value = object.type;
     placementPreviewActive = false;
     relocationPreviewActive = false;
-    if (center) Object.assign(view, { x: object.x, y: object.y });
+    if (center) {
+      Object.assign(view, { x: object.x, y: object.y });
+      clampViewCenter();
+    }
   }
   refresh();
   if (!object) {
@@ -1107,9 +1162,12 @@ function openGuildCodeDialog(guildId) {
 function closeObjectContextMenu() {
   $('object-context-menu').hidden = true;
   $('object-context-menu').replaceChildren();
+  territoryPreviewGuildId = '';
+  territoryPinnedGuildId = '';
+  requestDraw();
 }
 function openObjectContextMenu(object, clientX, clientY) {
-  if (!editable() || !$('object-context-menu').hidden) return;
+  if (!$('object-context-menu').hidden) return;
   selectObject(object);
   const menu = $('object-context-menu');
   const owner = state.guilds.find(entry => entry.id === objectGuildId(state, object));
@@ -1127,24 +1185,26 @@ function openObjectContextMenu(object, clientX, clientY) {
   const coordinates = document.createElement('span');
   coordinates.textContent = `S:${serverNumber} X:${object.x} Y:${object.y}`;
   header.append(title, coordinates);
-  const actions = [{ label: '削除', run: () => deleteObject(object.id) }];
-  if (object.type === 'shelter') {
-    if (member) {
-      actions.push(
-        ...(member.guildId === null ? [] : [{ label: 'ランク変更', run: () => {
-          contextMember = { guildId: member.guildId, memberId: member.id };
-          $('shelter-rank-select').value = member.rank == null ? '' : String(member.rank);
-          $('shelter-rank-dialog').querySelector('.dialog-status').textContent = '';
-          $('shelter-rank-dialog').showModal();
-        } }]),
-        { label: 'プレイヤーを編集', run: () => openPlayerActions(member) },
-        { label: member.guildId === null ? 'ギルドに加盟' : '別ギルドへ移籍',
-          run: () => openMembershipDialog(member) },
-        ...(member.guildId === null ? [] : [{ label: 'ギルドから脱退', run: () => leaveGuild(member) }]),
-      );
+  const actions = editable() ? [{ label: '削除', run: () => deleteObject(object.id) }] : [];
+  if (editable()) {
+    if (object.type === 'shelter') {
+      if (member) {
+        actions.push(
+          ...(member.guildId === null ? [] : [{ label: 'ランク変更', run: () => {
+            contextMember = { guildId: member.guildId, memberId: member.id };
+            $('shelter-rank-select').value = member.rank == null ? '' : String(member.rank);
+            $('shelter-rank-dialog').querySelector('.dialog-status').textContent = '';
+            $('shelter-rank-dialog').showModal();
+          } }]),
+          { label: 'プレイヤーを編集', run: () => openPlayerActions(member) },
+          { label: member.guildId === null ? 'ギルドに加盟' : '別ギルドへ移籍',
+            run: () => openMembershipDialog(member) },
+          ...(member.guildId === null ? [] : [{ label: 'ギルドから脱退', run: () => leaveGuild(member) }]),
+        );
+      }
+    } else if (object.type === 'fortress') {
+      actions.push({ label: 'ギルドコードの変更', run: () => openGuildCodeDialog(object.guildId) });
     }
-  } else if (object.type === 'fortress') {
-    actions.push({ label: 'ギルドコードの変更', run: () => openGuildCodeDialog(object.guildId) });
   }
   menu.replaceChildren(header, ...actions.map(({ label, run }) => {
     const button = document.createElement('button');
@@ -1169,14 +1229,50 @@ function openTerritoryContextMenu(guildIds, cell, clientX, clientY) {
   const header = document.createElement('div');
   header.className = 'object-context-menu-header';
   header.setAttribute('role', 'presentation');
-  const title = document.createElement('span');
-  title.textContent = guildIds.map(id => state.guilds.find(entry => entry.id === id))
-    .filter(Boolean).map(owner => `[${owner.name}] 総勢${membersFor(state, owner.id).length}名`).join(' / ');
+  const title = document.createElement('div');
+  title.className = 'territory-context-menu-guilds';
+  const owners = guildIds.map(id => state.guilds.find(entry => entry.id === id))
+    .filter(Boolean).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const setPreviewGuild = guildId => {
+    territoryPreviewGuildId = guildId;
+    for (const button of title.querySelectorAll('.territory-context-menu-guild')) {
+      button.dataset.highlighted = String(button.dataset.guildId === guildId);
+    }
+    requestDraw();
+  };
+  title.replaceChildren(...owners.map(owner => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'territory-context-menu-guild';
+    row.dataset.guildId = owner.id;
+    row.setAttribute('aria-pressed', 'false');
+    row.textContent = `[${owner.name}] 総勢${membersFor(state, owner.id).length}名`;
+    const highlight = () => {
+      setPreviewGuild(owner.id);
+    };
+    const restoreHighlight = () => {
+      setPreviewGuild(territoryPinnedGuildId);
+    };
+    row.addEventListener('pointerenter', highlight);
+    row.addEventListener('pointerleave', restoreHighlight);
+    row.addEventListener('focus', highlight);
+    row.addEventListener('blur', restoreHighlight);
+    row.addEventListener('click', () => {
+      territoryPinnedGuildId = territoryPinnedGuildId === owner.id ? '' : owner.id;
+      for (const button of title.querySelectorAll('.territory-context-menu-guild')) {
+        button.setAttribute('aria-pressed', String(button === row && !!territoryPinnedGuildId));
+      }
+      setPreviewGuild(territoryPinnedGuildId);
+    });
+    return row;
+  }));
   const coordinates = document.createElement('span');
   const serverNumber = /^S(\d+)$/.exec(serverId)?.[1] ?? '—';
   coordinates.textContent = `S:${serverNumber} X:${cell.x} Y:${cell.y}`;
   header.append(title, coordinates);
   menu.replaceChildren(header);
+  territoryPreviewGuildId = '';
+  territoryPinnedGuildId = '';
   menu.hidden = false;
   const bounds = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(4, Math.min(clientX, innerWidth - bounds.width - 4))}px`;
@@ -1220,15 +1316,16 @@ document.addEventListener('keydown', event => {
   if (selectedId || (editable() && placementPreviewActive)) {
     event.preventDefault();
     enterBrowseMode();
-    status('選択・配置プレビューを解除して閲覧モードにしました。');
+    status('選択・配置プレビューを解除し、施設ドラッグを画面移動にしました。');
   }
 });
 canvas.addEventListener('contextmenu', event => {
   const object = objectAtPointer(event);
-  if (!object) {
-    const cell = cellAtPointer(event);
-    const guildIds = cell ? territoryGuilds(state, cell.x, cell.y) : [];
-    if (!cell || !guildIds.length) return;
+  const cell = object ? null : cellAtPointer(event);
+  const guildIds = cell ? territoryGuilds(state, cell.x, cell.y) : [];
+  if (!object && !guildIds.length) {
+    const selectedObject = selected();
+    if (!selectedObject) return;
     event.preventDefault();
     clearTimeout(longPressTimer);
     longPressTimer = null;
@@ -1236,10 +1333,9 @@ canvas.addEventListener('contextmenu', event => {
       longPressPointerId = drag.id;
       drag = null;
     }
-    openTerritoryContextMenu(guildIds, cell, event.clientX, event.clientY);
+    openObjectContextMenu(selectedObject, event.clientX, event.clientY);
     return;
   }
-  if (!editable()) return;
   event.preventDefault();
   clearTimeout(longPressTimer);
   longPressTimer = null;
@@ -1247,9 +1343,11 @@ canvas.addEventListener('contextmenu', event => {
     longPressPointerId = drag.id;
     drag = null;
   }
-  openObjectContextMenu(object, event.clientX, event.clientY);
+  if (object) openObjectContextMenu(object, event.clientX, event.clientY);
+  else openTerritoryContextMenu(guildIds, cell, event.clientX, event.clientY);
 });
 function enterBrowseMode() {
+  if ($('mode').value !== 'browse') lastNonBrowseMode = $('mode').value;
   drag = null;
   clearTimeout(longPressTimer);
   longPressTimer = null;
@@ -1258,7 +1356,18 @@ function enterBrowseMode() {
   requestDraw();
 }
 $('object-clear').addEventListener('click', enterBrowseMode);
-$('map-browse').addEventListener('click', enterBrowseMode);
+$('map-browse').addEventListener('click', () => {
+  if (!editable() || $('mode').value !== 'browse') {
+    enterBrowseMode();
+    return;
+  }
+  selectObject(null);
+  $('mode').value = lastNonBrowseMode;
+  placementPreviewActive = lastNonBrowseMode === 'place';
+  relocationPreviewActive = false;
+  hover = null;
+  requestDraw();
+});
 for (const [type, name] of searchableObjectTypes) {
   const label = document.createElement('label');
   const checkbox = document.createElement('input');
@@ -1380,7 +1489,7 @@ function updateMapUrl() {
   if (!viewInitialized || !loaded || (!localMode && !serverId)) return;
   const url = new URL(location.href);
   url.searchParams.delete('hash');
-  url.searchParams.set('scale', String(view.scale));
+  url.searchParams.set('scale', String(Number(view.scale.toFixed(2))));
   if (localMode) {
     url.searchParams.delete('map');
     url.searchParams.delete('server');
@@ -1412,8 +1521,8 @@ async function loadServer(id) {
   if (![...$('server').options].some(entry => entry.value === id)) $('server').append(option(id, id));
   $('server').value = id;
   updateMapUrl();
-  status(revision === 0 ? `${id} の空マップです。${session.user?.can_edit ? '編集して保存すると登録されます。' : '登録・保存するにはログインと表示名登録が必要です。'}` :
-    `${id} 第${revision}版を読み込みました。${session.user?.can_edit ? '編集後に保存してください。' : '閲覧のみです。'}`);
+  status(revision === 0 ? `${id} の空マップです。${hasServerEditPermission() ? '編集して保存すると登録されます。' : '編集にはGoogleログインと対象サーバーの申請・承認が必要です。'}` :
+    `${id} 第${revision}版を読み込みました。${hasServerEditPermission() ? '編集後に保存してください。' : '閲覧のみです。編集権限はアカウントの「編集権限」から申請できます。'}`);
 }
 $('server').addEventListener('change', () => {
   const id = $('server').value;
@@ -1478,7 +1587,7 @@ $('revision-view').addEventListener('click', () => {
 });
 $('revision-restore').addEventListener('click', () => {
   const number = Number($('history').value);
-  if (!number || !session.user?.can_edit || !discardChanges()
+  if (!number || !editable() || !discardChanges()
     || !window.confirm(`第${number}版の内容を共有マップの新しい版として保存しますか？`)) return;
   communicate(async () => {
     const result = await mapRequest(`/maps/${serverId}/restore`, session.csrf,
@@ -1523,6 +1632,7 @@ async function initializeStorage() {
       if (!target) status(`URLで指定したギルド「${link.guild}」が見つかりません。${link.x === null ? '中央基地' : '指定座標'}を表示します。`, true);
     }
     Object.assign(view, initialMapView(state, link.guild, link.scale, link.x, link.y));
+    clampViewCenter();
     viewInitialized = true;
     requestDraw();
     updateMapUrl();
@@ -1641,6 +1751,7 @@ function startEdgeMotion() {
         markMapInteracting();
         view.x += vx * seconds / view.scale;
         view.y += vy * seconds / view.scale;
+        clampViewCenter();
         updateDragCandidate(drag.point);
         requestDraw();
       }
@@ -1778,13 +1889,20 @@ function draw() {
   const interactionLabel = dragging
     ? drag.object ? '✥ 施設移動中' : '✋ 画面移動中'
     : placing ? relocationPreviewActive || $('mode').value !== 'place' ? '＋ 座標配置待機中' : '＋ 配置待機中'
-      : movable ? '✥ 施設選択中' : '✋ 画面移動';
+    : movable ? '✥ 施設選択中' : $('mode').value === 'browse' ? '✋ 画面移動（施設選択可）' : '✋ 画面移動';
   if ($('interaction-state').textContent !== interactionLabel) $('interaction-state').textContent = interactionLabel;
   $('interaction-state').dataset.state = dragging && drag.object ? 'move'
     : placing ? 'place' : movable ? 'selected' : 'browse';
-  $('map-access').textContent = !maximized && editable() && $('mode').value !== 'browse'
-    ? '編集可能モード' : '閲覧モード';
-  $('map-browse').setAttribute('aria-pressed', String($('mode').value === 'browse'));
+  $('map-access').textContent = canEditMap()
+    ? readOnlyMode ? '閲覧専用モード' : '編集可能モード'
+    : '閲覧専用モード';
+  const browseMode = $('mode').value === 'browse';
+  $('map-browse').textContent = browseMode ? '施設ドラッグを有効化' : '施設ドラッグを無効化';
+  $('map-browse').title = browseMode
+    ? '施設をドラッグして移動できるようにします。右クリックメニューは編集権限に従います。'
+    : '施設のドラッグを画面移動に切り替えます。選択や右クリックメニューは引き続き使えます。';
+  $('map-browse').setAttribute('aria-pressed', String(browseMode));
+  $('map-browse').hidden = browseMode && !editable();
   canvas.style.cursor = dragging ? drag.object ? 'move' : 'grabbing'
     : placing && $('mode').value === 'place' ? 'crosshair'
       : movable && hover && objectAt(state, hover.x, hover.y)?.id === selectedId ? 'move' : 'grab';
@@ -1816,12 +1934,37 @@ function draw() {
     if (edgeVisible && view.scale >= 3 && !outlineBitmap) prepareOutlineBitmap();
   }
   polygon(WASTELAND, colors.wasteland);
-  polygon(LAB, colors.lab);
   const minX = Math.max(0, Math.floor(view.x - halfWorldWidth - 2));
   const maxX = Math.min(511, Math.ceil(view.x + halfWorldWidth + 2));
   const minY = Math.max(0, Math.floor(view.y - halfWorldHeight - 2));
   const maxY = Math.min(1023, Math.ceil(view.y + halfWorldHeight + 2));
   const visible = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
+  const labCells = [];
+  for (let x = 244; x <= 268; x++) {
+    for (let y = 500 + ((x % 2 === 500 % 2) ? 0 : 1); y <= 524; y += 2) {
+      if (terrain(x, y) === 'lab') labCells.push({ x, y });
+    }
+  }
+  const labEdges = cellBoundary(labCells);
+  if (!labEdges.length) throw new Error('実験基地外囲を描画できません。');
+  const [startX, startY] = labEdges[0][0];
+  context.beginPath();
+  const first = screen(startX, startY);
+  context.moveTo(first.x, first.y);
+  let end = labEdges[0][1];
+  let edgeCount = 1;
+  while (end[0] !== startX || end[1] !== startY) {
+    const point = screen(end[0], end[1]);
+    context.lineTo(point.x, point.y);
+    const next = labEdges.find(([start]) => start[0] === end[0] && start[1] === end[1]);
+    if (!next || edgeCount >= labEdges.length) throw new Error('実験基地外囲の輪郭を描画できません。');
+    end = next[1];
+    edgeCount++;
+  }
+  if (edgeCount !== labEdges.length) throw new Error('実験基地外囲の輪郭が閉じていません。');
+  context.closePath();
+  context.fillStyle = colors.lab;
+  context.fill();
   if (view.scale >= 5) {
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY + ((minY % 2 === x % 2) ? 0 : 1); y <= maxY; y += 2) {
@@ -1830,7 +1973,9 @@ function draw() {
     }
   }
   for (const [x, y] of TURRETS) {
-    for (const cell of footprint({ x, y, size: 2 })) diamond(cell.x, cell.y, '#d9a65b', '#42351f', .8);
+    for (const cell of footprint({ x, y, size: 2 })) {
+      diamond(cell.x, cell.y, '#d9a65b', '#42351f', .8);
+    }
   }
   const mountainCells = new Set(state.mountains.flatMap(footprint).map(cellKey));
   const territories = new Map();
@@ -1844,7 +1989,8 @@ function draw() {
     if (previous) previewFacilities[previewFacilities.findIndex(object => object.id === previous.id)] = { ...previous, ...placement, id: previous.id };
     else previewFacilities.push(placement);
   }
-  const sources = territorySources({ ...state, facilities: previewFacilities });
+  const territoryState = { ...state, facilities: previewFacilities };
+  const sources = territorySources(territoryState);
   const outpostPreviewId = placement?.type.startsWith('outpost')
     ? placedFacility(state, placement)?.id ?? placement.id : null;
   const territoryDisplaySources = outpostPreviewId ? territorySources(state) : sources;
@@ -1883,6 +2029,40 @@ function draw() {
       context.restore();
     }
   }
+  const boundaryKey = JSON.stringify([
+    state.mountains.map(({ id, x, y, size }) => [id, x, y, size]),
+    sources.active.map(({ id, type, x, y }) => [id, type, x, y]),
+  ]);
+  if (boundaryKey !== sourceBoundaryCacheKey) {
+    sourceBoundaryCache = territorySourceBoundaries(territoryState);
+    sourceBoundaryCacheKey = boundaryKey;
+  }
+  const sourceEdges = new Map([[true, new Map()], [false, new Map()]]);
+  for (const source of sources.active) {
+    const edges = sourceEdges.get(source.guildId === state.ownGuildId);
+    for (const [a, b] of sourceBoundaryCache.get(source.id) ?? []) {
+      const first = `${a[0]},${a[1]}`;
+      const second = `${b[0]},${b[1]}`;
+      const key = first < second ? `${first}|${second}` : `${second}|${first}`;
+      if (!edges.has(key)) edges.set(key, [a, b]);
+    }
+  }
+  context.save();
+  context.globalAlpha = .62;
+  context.lineWidth = Math.max(.7, Math.min(1.1, view.scale * .075));
+  for (const [isOwn, edges] of sourceEdges) {
+    if (!edges.size) continue;
+    context.beginPath();
+    for (const [[ax, ay], [bx, by]] of edges.values()) {
+      const a = screen(ax, ay);
+      const b = screen(bx, by);
+      context.moveTo(a.x, a.y);
+      context.lineTo(b.x, b.y);
+    }
+    context.strokeStyle = isOwn ? '#78ad67' : '#b56b5b';
+    context.stroke();
+  }
+  context.restore();
   const detachedIds = new Set(sources.detached.map(object => object.id));
   const labels = [];
   for (const object of objects()) {
@@ -1948,7 +2128,12 @@ function draw() {
     }
   }
   drawPlacementPreview(visible);
-  const territoryState = { ...state, facilities: previewFacilities };
+  const territoryHighlightGuildId = territoryPreviewGuildId || state.ownGuildId;
+  for (const [guildId, boundary] of territoryGuildBoundaries(territoryState)) {
+    const highlighted = guildId === territoryHighlightGuildId;
+    drawTerritoryBoundary(boundary, highlighted ? '#8de4ff' : '#d9e8c7',
+      highlighted ? 2.2 : 1.25);
+  }
   const selectedSource = sources.active.find(object => object.id === selectedId);
   const placementSourceId = placement && (placement.type === 'fortress' || placement.type.startsWith('outpost'))
     ? placedFacility(state, placement)?.id ?? placement.id : null;
@@ -1975,6 +2160,44 @@ function draw() {
   }
   const selectedLabel = selected();
   if (selectedLabel && footprint(selectedLabel).some(cell => visible(cell.x, cell.y))) drawObjectLabel(selectedLabel, true);
+  context.restore();
+}
+
+function drawTerritoryBoundary(edges, color, lineWidth) {
+  if (!edges.length) return;
+  const starts = new Map();
+  edges.forEach((edge, index) => {
+    const key = edge[0].join(',');
+    const list = starts.get(key) ?? [];
+    list.push(index);
+    starts.set(key, list);
+  });
+  const used = new Set();
+  context.beginPath();
+  for (let index = 0; index < edges.length; index++) {
+    if (used.has(index)) continue;
+    const [startX, startY] = edges[index][0];
+    let current = index;
+    const start = screen(startX, startY);
+    context.moveTo(start.x, start.y);
+    while (!used.has(current)) {
+      used.add(current);
+      const [, [endX, endY]] = edges[current];
+      const point = screen(endX, endY);
+      context.lineTo(point.x, point.y);
+      current = (starts.get(`${endX},${endY}`) ?? []).find(next => !used.has(next));
+      if (current === undefined) break;
+    }
+  }
+  context.save();
+  context.strokeStyle = '#14251d';
+  context.lineWidth = lineWidth + 2;
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.stroke();
+  context.strokeStyle = color;
+  context.lineWidth = lineWidth;
+  context.stroke();
   context.restore();
 }
 
@@ -2053,30 +2276,160 @@ function drawPlacementPreview(visible) {
   context.restore();
 }
 
-function zoom(factor, point = { x: width / 2, y: height / 2 }) {
+function zoom(factor, point = { x: width / 2, y: height / 2 }, anchorOutsideToMapCorner = false) {
   markMapInteracting();
-  const before = world(point);
-  view.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * factor));
-  const after = world(point);
-  view.x += before.x - after.x;
-  view.y += before.y - after.y;
+  const cursorWorld = world(point);
+  const cursorOutsideMap = anchorOutsideToMapCorner
+    && !inPolygon(cursorWorld.x, cursorWorld.y, mapOutlinePaths[0]);
+  const nextScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * factor));
+  if (cursorOutsideMap) {
+    const currentMapFits = 513 * view.scale <= width && 1025 * view.scale <= height;
+    const nextMapFits = 513 * nextScale <= width && 1025 * nextScale <= height;
+    if (nextMapFits) {
+      view.x = 255.5;
+      view.y = 511.5;
+    } else if (currentMapFits && nextScale > view.scale) {
+      view.x = Math.max(0, Math.min(511, cursorWorld.x))
+        - (point.x - width / 2) / nextScale;
+      view.y = Math.max(0, Math.min(1023, cursorWorld.y))
+        - (point.y - height / 2) / nextScale;
+    }
+    view.scale = nextScale;
+  } else {
+    const before = world(point);
+    view.scale = nextScale;
+    const after = world(point);
+    view.x += before.x - after.x;
+    view.y += before.y - after.y;
+  }
+  clampViewCenter();
   updateMapUrl();
   requestDraw();
   settleMapInteraction();
 }
+
+let waitingAppWorker = null;
+let appReloadAvailable = false;
+let applyingAppUpdate = false;
+let appController = null;
+let appUpdateCheckFailed = false;
+function showAppUpdate(worker) {
+  waitingAppWorker = worker;
+  appReloadAvailable = false;
+  const button = $('app-update');
+  button.hidden = false;
+  button.disabled = false;
+  button.textContent = 'アプリの新版があります';
+  button.setAttribute('aria-label', '新しいアプリ版に更新');
+}
+async function checkAppUpdate(registration) {
+  if (!navigator.onLine || document.hidden) return;
+  try {
+    await registration.update();
+    if (appUpdateCheckFailed) {
+      $('offline').textContent = registration.waiting
+        ? '新しいアプリ版を準備しました。未保存の変更がないことを確認して更新してください。'
+        : 'アプリ画面をこの端末に保存しました。共有マップの読み込み・保存には通信が必要です。';
+      appUpdateCheckFailed = false;
+    }
+  } catch (error) {
+    if (!appUpdateCheckFailed) console.error('App update check failed:', error);
+    appUpdateCheckFailed = true;
+    $('offline').textContent = 'アプリの新版を確認できません。ネットワーク接続を確認してください。';
+  }
+}
+async function initializeServiceWorker() {
+  const offlineStatus = $('offline');
+  if (!('serviceWorker' in navigator)) {
+    offlineStatus.textContent = 'このブラウザーではオフライン機能を利用できません。';
+    return;
+  }
+  appController = navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    const controller = navigator.serviceWorker.controller;
+    if (applyingAppUpdate) {
+      window.location.reload();
+      return;
+    }
+    if (appController && controller !== appController) {
+      appReloadAvailable = true;
+      waitingAppWorker = null;
+      const button = $('app-update');
+      button.hidden = false;
+      button.disabled = false;
+      button.textContent = '新版を読み込む';
+      button.setAttribute('aria-label', '新版のアプリを読み込む');
+    }
+    appController = controller;
+  });
+  $('app-update').addEventListener('click', () => {
+    if (history.dirty(state)) {
+      const message = '未保存の変更があります。先に保存するか、メニューからJSONバックアップしてください。';
+      status(message, true);
+      $('tools-dialog').showModal();
+      document.querySelector('#tools-dialog .dialog-status').textContent = message;
+      return;
+    }
+    if (waitingAppWorker) {
+      applyingAppUpdate = true;
+      $('app-update').disabled = true;
+      $('app-update').textContent = 'アプリを更新中…';
+      waitingAppWorker.postMessage({ type: 'SKIP_WAITING' });
+      return;
+    }
+    if (appReloadAvailable) {
+      window.location.reload();
+      return;
+    }
+    $('app-update').hidden = true;
+  });
+  try {
+    const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+    const inspect = () => {
+      if (registration.waiting && navigator.serviceWorker.controller) {
+        showAppUpdate(registration.waiting);
+        offlineStatus.textContent = '新しいアプリ版を準備しました。未保存の変更がないことを確認して更新してください。';
+      } else if (!registration.installing && registration.active) {
+        $('app-update').hidden = true;
+        offlineStatus.textContent = 'アプリ画面をこの端末に保存しました。共有マップの読み込み・保存には通信が必要です。';
+      }
+    };
+    registration.addEventListener('updatefound', () => {
+      const installing = registration.installing;
+      if (!installing) return;
+      offlineStatus.textContent = 'アプリの新版を確認しています。';
+      installing.addEventListener('statechange', () => {
+        if (installing.state === 'installed' || installing.state === 'activated') inspect();
+      });
+    });
+    inspect();
+    await checkAppUpdate(registration);
+    window.setInterval(() => checkAppUpdate(registration), 5 * 60 * 1000);
+    window.addEventListener('focus', () => checkAppUpdate(registration));
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) checkAppUpdate(registration);
+    });
+    window.addEventListener('online', () => checkAppUpdate(registration));
+  } catch (error) {
+    console.error('Service worker registration failed:', error);
+    offlineStatus.textContent = 'オフライン機能の初期化に失敗しました。通信状態とHTTPS接続を確認してください。';
+  }
+}
+
 function home() {
   markMapInteracting();
   const fortress = state.facilities.find(o => o.type === 'fortress' && o.guildId === state.ownGuildId);
   Object.assign(view, { x: fortress?.x ?? 256, y: fortress?.y ?? 512, scale: 14 });
+  clampViewCenter();
   updateMapUrl();
   requestDraw();
   settleMapInteraction();
 }
-function stepZoom(direction, point) {
+function stepZoom(direction, point, anchorOutsideToMapCorner = false) {
   const percent = view.scale / DEFAULT_SCALE * 100;
   const next = direction > 0 ? (Math.floor((percent + .00001) / 10) + 1) * 10
     : (Math.ceil((percent - .00001) / 10) - 1) * 10;
-  zoom(Math.max(MIN_SCALE, next / 100 * DEFAULT_SCALE) / view.scale, point);
+  zoom(Math.max(MIN_SCALE, next / 100 * DEFAULT_SCALE) / view.scale, point, anchorOutsideToMapCorner);
 }
 $('zoom-in').addEventListener('click', () => stepZoom(1));
 $('zoom-out').addEventListener('click', () => stepZoom(-1));
@@ -2105,6 +2458,16 @@ $('zoom-level').addEventListener('keydown', event => {
 $('zoom-level').addEventListener('blur', commitZoomInput);
 $('home').addEventListener('click', home);
 $('tools-open').addEventListener('click', () => $('tools-dialog').showModal());
+$('access-mode-toggle').addEventListener('click', () => {
+  if (!canEditMap() || busy) return;
+  readOnlyMode = !readOnlyMode;
+  if (readOnlyMode) enterBrowseMode();
+  else refreshPersistence();
+  $('tools-dialog').close();
+  status(readOnlyMode
+    ? '閲覧専用に切り替えました。未保存の変更は保持されています。'
+    : '編集モードに戻りました。マップ操作を選んで編集できます。');
+});
 $('console-drawer-toggle').addEventListener('click', event => {
   const button = event.currentTarget;
   const expanded = button.getAttribute('aria-expanded') !== 'true';
@@ -2141,7 +2504,7 @@ canvas.addEventListener('wheel', event => {
   wheelDelta += delta;
   while (Math.abs(wheelDelta) >= 80) {
     const direction = Math.sign(wheelDelta);
-    stepZoom(-direction, pointer(event));
+    stepZoom(-direction, pointer(event), true);
     wheelDelta -= direction * 80;
   }
 }, { passive: false });
@@ -2176,7 +2539,7 @@ canvas.addEventListener('pointerdown', event => {
     candidate: object ? { ...object } : null, origin: raw };
   startEdgeMotion();
   canvas.setPointerCapture(event.pointerId);
-  if (event.pointerType === 'touch' && hit && editable()) {
+  if (event.pointerType === 'touch' && hit) {
     longPressTimer = setTimeout(() => {
       longPressTimer = null;
       if (!drag || drag.id !== event.pointerId || drag.moved) return;
@@ -2199,6 +2562,7 @@ canvas.addEventListener('pointermove', event => {
           view.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * next.distance / pinch.distance));
           view.x = anchor.x - (next.center.x - width / 2) / view.scale;
           view.y = anchor.y - (next.center.y - height / 2) / view.scale;
+          clampViewCenter();
           updateMapUrl();
         }
         pinch = next;
@@ -2220,6 +2584,7 @@ canvas.addEventListener('pointermove', event => {
       } else {
         view.x -= (point.x - drag.point.x) / view.scale;
         view.y -= (point.y - drag.point.y) / view.scale;
+        clampViewCenter();
       }
     }
     drag.point = point;
@@ -2269,10 +2634,13 @@ canvas.addEventListener('pointerup', event => {
   $('x').value = cell.x;
   $('y').value = cell.y;
   const hit = objectAt(state, cell.x, cell.y);
-  if (hit && $('mode').value !== 'browse') {
+  if (hit) {
+    const browseMode = $('mode').value === 'browse';
     selectObject(hit);
-    $('mode').value = 'select';
-    status(!maximized && editable() ? '施設を選択しました。選択した施設をドラッグすると移動できます。' : '施設を選択しました。閲覧のみです。');
+    if (!browseMode) $('mode').value = 'select';
+    status(!maximized && editable() && !browseMode
+      ? '施設を選択しました。選択した施設をドラッグすると移動できます。'
+      : '施設を選択しました。ドラッグは画面移動として動作します。');
   } else {
     const guildIds = territoryGuilds(state, cell.x, cell.y);
     const placing = !maximized && editable() && $('mode').value === 'place' && placementPreviewActive;
@@ -2326,6 +2694,7 @@ canvas.addEventListener('keydown', event => {
   markMapInteracting();
   view.x += deltas[event.key][0];
   view.y += deltas[event.key][1];
+  clampViewCenter();
   requestDraw();
   settleMapInteraction();
 });
@@ -2345,3 +2714,4 @@ new ResizeObserver(() => {
 refresh();
 home();
 initializeStorage();
+initializeServiceWorker();

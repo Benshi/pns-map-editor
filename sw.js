@@ -1,10 +1,12 @@
-const CACHE = 'pns-map-editor-v75';
+const CACHE = 'pns-map-editor-v108';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './model.js', './persistence.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(
     ASSETS.map(asset => new Request(new URL(asset, self.registration.scope), { cache: 'reload' })),
-  )).then(() => self.skipWaiting()));
+  )).then(() => {
+    if (!self.registration.active) return self.skipWaiting();
+  }));
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(
@@ -17,4 +19,7 @@ self.addEventListener('fetch', event => {
   const assetURLs = ASSETS.map(asset => new URL(asset, self.registration.scope).href);
   if (!assetURLs.includes(url.href)) return;
   event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
+});
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
 });

@@ -301,7 +301,10 @@ export const territoryContains = (object, x, y) =>
 
 export function territoryBoundary(state, source) {
   if (!territorySources(state).active.some(object => object.id === source.id)) return [];
-  const mountains = new Set(state.mountains.flatMap(footprint).map(cellKey));
+  return sourceTerritoryBoundary(source, new Set(state.mountains.flatMap(footprint).map(cellKey)));
+}
+
+function sourceTerritoryBoundary(source, mountains) {
   const cells = new Map();
   const radius = territoryRadius(source);
   for (let x = source.x - radius; x <= source.x + radius; x++) {
@@ -313,6 +316,30 @@ export function territoryBoundary(state, source) {
     }
   }
   return cellBoundary([...cells.values()]);
+}
+
+export function territorySourceBoundaries(state) {
+  const mountains = new Set(state.mountains.flatMap(footprint).map(cellKey));
+  return new Map(territorySources(state).active.map(source =>
+    [source.id, sourceTerritoryBoundary(source, mountains)]));
+}
+
+export function territoryGuildBoundaries(state) {
+  const cellsByGuild = new Map();
+  for (const source of territorySources(state).active) {
+    const radius = territoryRadius(source);
+    const cells = cellsByGuild.get(source.guildId) ?? new Map();
+    for (let x = source.x - radius; x <= source.x + radius; x++) {
+      for (let y = source.y - radius; y <= source.y + radius; y++) {
+        if (validCell(x, y) && territoryContains(source, x, y)) {
+          cells.set(`${x},${y}`, { x, y });
+        }
+      }
+    }
+    cellsByGuild.set(source.guildId, cells);
+  }
+  return new Map([...cellsByGuild].map(([guildId, cells]) =>
+    [guildId, cellBoundary([...cells.values()])]));
 }
 
 export function cellBoundary(occupiedCells) {
