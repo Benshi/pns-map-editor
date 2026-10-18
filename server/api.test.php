@@ -140,16 +140,19 @@ try {
             . DIRECTORY_SEPARATOR . 'sess_' . $session, $data) !== false, 'Session fixture failed.');
     };
     $seed($users[0]['id']);
+    $result = $request(['session' => $session]);
+    expect(str_contains($result['html'], '&lt;script&gt;alert(1)&lt;/script&gt;')
+        && !str_contains($result['html'], '<script>'), 'Suggested profile name was not escaped.');
     $result = $request(['session' => $session, 'route' => '/session']);
     expect(json_decode($result['html'], true)['user']['admin'], 'Administrator flag missing.');
-    $result = $request(['session' => $session]);
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users']]);
     expect(str_contains($result['html'], '登録日時：'), 'Registration date label missing.');
-    expect(str_contains($result['html'], '<br>登録日時：（管理者）'), 'Unknown registration date was not blank.');
+    expect(str_contains($result['html'], '登録日時：不明'), 'Unknown registration date was not labeled.');
     $users[1]['registered_at'] = '2026-10-13T16:05:52Z';
     expect(file_put_contents($private . DIRECTORY_SEPARATOR . 'users.json',
         json_encode($users, JSON_THROW_ON_ERROR)) !== false, 'Registration date fixture failed.');
-    $result = $request(['session' => $session]);
-    expect(str_contains($result['html'], '登録日時：2026-10-14 01:05:52（日本時間）'),
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users']]);
+    expect(str_contains($result['html'], '登録日時：2026-10-14 01:05（日本時間）'),
         'Registration date was not displayed in Japan time.');
     $result = $request(['session' => $session, 'route' => '/maps']);
     expect(json_decode($result['html'], true)['servers'] === ['S1063'], 'Admin catalog failed.');
@@ -157,10 +160,9 @@ try {
     expect(mkdir($directory, 0700, true), 'Legacy sharing fixture directory failed.');
     expect(file_put_contents($directory . DIRECTORY_SEPARATOR . 'share.json',
         json_encode(str_repeat('a', 64))) !== false, 'Legacy sharing fixture failed.');
-    $result = $request(['session' => $session]);
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users']]);
     expect(str_contains($result['html'], '編集停止の管理')
-        && str_contains($result['html'], '&lt;script&gt;')
-        && !str_contains($result['html'], '123456') && !str_contains($result['html'], '@'),
+        && !str_contains($result['html'], '123456') && !str_contains($result['html'], 'private@example.com'),
         'Admin page leaked identity or profile was not escaped.');
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/name',
         'post' => ['csrf' => $csrf, 'name' => 'Same Name']]);
@@ -206,8 +208,72 @@ try {
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/name',
         'post' => ['csrf' => $csrf, 'name' => 'Builder']]);
     expect($result['status'] === 303, 'Editor name registration failed.');
+    $result = $request(['session' => $session, 'route' => '/session']);
+    expect(!json_decode($result['html'], true)['user']['can_edit'], 'Legacy profile inherited edit access.');
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin']]);
+    expect($result['status'] === 403, 'General user accessed administration.');
+    $result = $request(['session' => $session, 'route' => '/maps/S1063', 'query' => ['server' => 'S1063']]);
+    expect($result['status'] === 403, 'Unapproved user bootstrapped map.');
+    $result = $request(['session' => $session, 'route' => '/maps/S1063', 'query' => $query]);
+    expect($result['status'] === 200, 'Unapproved user could not view shared map.');
+    $result = $request(['session' => $session, 'query' => ['return' => 'map=' . $code]]);
+    expect(str_contains($result['html'], 'value="S1063"')
+        && !str_contains($result['html'], '<h2>管理者'), 'Account lost server context or exposed administration.');
+    expect(substr_count($result['html'], '>ログアウト</button>') === 1
+        && strpos($result['html'], '>ログアウト</button>') < strpos($result['html'], '<main ')
+        && !str_contains($result['html'], 'name="name"')
+        && !str_contains($result['html'], 'id="notifications"')
+        && !str_contains($result['html'], 'id="requests"'), 'Account mixed panels or hid logout below content.');
+    $result = $request(['session' => $session, 'query' => ['tab' => 'profile']]);
+    expect(str_contains($result['html'], 'name="name"')
+        && !str_contains($result['html'], 'name="message"'), 'Profile panel did not isolate name settings.');
+    $result = $request(['session' => $session, 'query' => ['tab' => 'notifications']]);
+    expect(str_contains($result['html'], 'id="notifications"')
+        && str_contains($result['html'], '通知はありません。')
+        && !str_contains($result['html'], 'name="name"'), 'Notification panel failed.');
+    $result = $request(['session' => $session, 'query' => ['tab' => 'requests']]);
+    expect(str_contains($result['html'], 'id="requests"')
+        && !str_contains($result['html'], 'name="message"'), 'Request history mixed application form.');
+    $result = $request(['session' => $session, 'query' => ['tab' => 'invalid']]);
+    expect($result['status'] === 400, 'Unknown account panel silently accepted.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/maps/S1063',
+        'query' => $query, 'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 2, 'map' => $map])]]);
+    expect($result['status'] === 403, 'Unapproved user saved through shared URL.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/maps/S1063/restore',
+        'query' => $query, 'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 2, 'restore_revision' => 1])]]);
+    expect($result['status'] === 403, 'Unapproved user restored past revision.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/request',
+        'post' => ['csrf' => 'invalid', 'server' => '1063', 'message' => 'Apply']]);
+    expect($result['status'] === 403, 'Application bypassed CSRF.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/request',
+        'post' => ['csrf' => $csrf, 'server' => '1063', 'message' => '<script>request</script>']]);
+    expect($result['status'] === 303, 'Permission request failed.');
+    $access = json_decode(file_get_contents($private . DIRECTORY_SEPARATOR . 'access.json'), true);
+    $requestId = $access['requests'][0]['id'];
+    $seed($users[0]['id']);
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin']]);
+    expect(str_contains($result['html'], '&lt;script&gt;request&lt;/script&gt;'), 'Request message was not escaped.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/admin/decision',
+        'post' => ['csrf' => $csrf, 'request' => $requestId, 'status' => 'approved', 'message' => 'Welcome']]);
+    expect($result['status'] === 303, 'Approval failed.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/admin/roles',
+        'post' => ['csrf' => $csrf, 'target' => $users[1]['id'], 'server' => '999', 'editor' => '1']]);
+    expect($result['status'] === 303, 'Additional server grant failed.');
+    $seed($users[1]['id']);
+    $result = $request(['session' => $session, 'route' => '/session']);
+    $userSession = json_decode($result['html'], true);
+    expect($userSession['user']['editable_servers'] === ['S1063', 'S999']
+        && $userSession['unread_count'] === 2, 'Scoped session or notifications failed.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/read',
+        'post' => ['csrf' => $csrf, 'through' => '3']]);
+    expect($result['status'] === 303, 'Notification read failed.');
+    $result = $request(['session' => $session, 'route' => '/session']);
+    expect(json_decode($result['html'], true)['unread_count'] === 0, 'Read notification count not cleared.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/maps/S1047',
+        'query' => ['server' => 'S1047'], 'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 0, 'map' => $map])]]);
+    expect($result['status'] === 403, 'Approved user saved to unrelated server.');
     $result = $request(['session' => $session, 'route' => '/maps']);
-    expect($result['status'] === 400, 'Editor received all-server catalog.');
+    expect($result['status'] === 403, 'Editor received all-server catalog.');
     $result = $request(['session' => $session, 'route' => '/maps/S1063', 'query' => ['server' => 'S1063']]);
     expect($result['status'] === 200 && json_decode($result['html'], true)['code'] === $code,
         'Editor could not bootstrap sharing link.');
@@ -229,6 +295,14 @@ try {
     $seed($users[0]['id']);
     $result = $request(['session' => $session, 'route' => '/maps']);
     expect(json_decode($result['html'], true)['servers'] === ['S999', 'S1063'], 'New server missing from admin catalog.');
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/admin/roles',
+        'post' => ['csrf' => $csrf, 'target' => $users[1]['id'], 'server' => '1063']]);
+    expect($result['status'] === 303, 'Permission revocation failed.');
+    $seed($users[1]['id']);
+    $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/maps/S1063/restore',
+        'query' => $query, 'post' => ['csrf' => $csrf, 'payload' => json_encode(['base_revision' => 2, 'restore_revision' => 1])]]);
+    expect($result['status'] === 403, 'Stale session retained revoked restore permission.');
+    $seed($users[0]['id']);
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/admin/suspension',
         'post' => ['csrf' => $csrf, 'target' => $users[1]['id'], 'stop' => '1']]);
     expect($result['status'] === 303, 'Admin suspension failed.');
@@ -251,6 +325,27 @@ try {
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/account/name',
         'post' => ['csrf' => 'invalid', 'name' => 'Other']]);
     expect($result['status'] === 403, 'Name update bypassed CSRF.');
+    $latestUsers = json_decode(file_get_contents($private . DIRECTORY_SEPARATOR . 'users.json'), true, 32, JSON_THROW_ON_ERROR);
+    for ($index = 1; $index <= 25; $index++) {
+        $latestUsers[] = ['sub' => (string) (1000 + $index),
+            'id' => 'user-' . str_pad(dechex(1000 + $index), 24, '0', STR_PAD_LEFT),
+            'display_name' => 'Pagination ' . $index, 'admin' => false, 'suspended' => false,
+            'registered_at' => null];
+    }
+    expect(file_put_contents($private . DIRECTORY_SEPARATOR . 'users.json',
+        json_encode($latestUsers, JSON_THROW_ON_ERROR)) !== false, 'Pagination fixture failed.');
+    $seed($users[0]['id']);
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users']]);
+    expect(substr_count($result['html'], '<article>') === 20 && str_contains($result['html'], '次へ'),
+        'User list did not paginate.');
+    expect(substr_count($result['html'], '<details name="user-detail">') === 20
+        && str_contains($result['html'], '<details class="filter-options">')
+        && strpos($result['html'], '>ログアウト</button>') < strpos($result['html'], '<main '),
+        'Administration did not collapse detail or expose logout.');
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users', 'page' => '2']]);
+    expect(substr_count($result['html'], '<article>') === 7, 'User list second page failed.');
+    $result = $request(['session' => $session, 'query' => ['view' => 'admin', 'tab' => 'users', 'q' => 'Pagination 25']]);
+    expect(substr_count($result['html'], '<article>') === 1, 'User search did not filter.');
     $result = $request(['session' => $session, 'method' => 'POST', 'route' => '/auth/logout',
         'post' => ['csrf' => $csrf]]);
     expect($result['status'] === 303 && $result['state'] === [], 'Logout failed.');
@@ -266,7 +361,7 @@ try {
         }
         expect(rmdir($sessions), 'Session directory cleanup failed.');
     }
-    foreach (['config.php', 'google-client.json', 'users.json', 'users.lock'] as $name) {
+    foreach (['config.php', 'google-client.json', 'users.json', 'users.lock', 'access.json'] as $name) {
         $file = $private . DIRECTORY_SEPARATOR . $name;
         if (file_exists($file)) {
             expect(unlink($file), 'Config cleanup failed.');

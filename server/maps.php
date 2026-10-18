@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/access.php';
+
 final class MapConflict extends RuntimeException {}
 
 function emptySharedMap(): array
@@ -359,9 +361,8 @@ function atomicMapWrite(string $directory, string $name, string $content): void
 }
 
 function saveSharedMap(string $private, string $server, int $base, mixed $map, string $userId,
-    ?int $restore = null): array
+    ?int $restore = null, array $config = []): array
 {
-    $directory = mapDirectory($private, $server);
     // Lock order is users then map, so a suspension cannot race a successful save.
     $usersLock = fopen($private . DIRECTORY_SEPARATOR . 'users.lock', 'c');
     if ($usersLock === false) {
@@ -373,14 +374,16 @@ function saveSharedMap(string $private, string $server, int $base, mixed $map, s
             throw new RuntimeException('Could not lock users registry.');
         }
         $author = null;
+        $access = readAccess($private);
         foreach (readUsers($private . DIRECTORY_SEPARATOR . 'users.json') as $user) {
-            if ($user['id'] === $userId && canEdit($user)) {
+            if ($user['id'] === $userId && canEditServer($user, $server, $config, $access)) {
                 $author = ['id' => $user['id'], 'display_name' => $user['display_name']];
             }
         }
         if ($author === null) {
-            throw new InvalidArgumentException('表示名登録が必要、または編集停止中です。');
+            throw new InvalidArgumentException('このサーバーの編集権限がありません。申請状況または編集停止状態を確認してください。');
         }
+        $directory = mapDirectory($private, $server);
         $lock = fopen($directory . DIRECTORY_SEPARATOR . 'save.lock', 'c');
         if ($lock === false || !flock($lock, LOCK_EX)) {
             throw new RuntimeException('Could not lock map.');

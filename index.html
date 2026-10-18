@@ -15,8 +15,8 @@
   <header>
     <div id="title-area">
       <h1>P&S ギルドマップエディター</h1>
-      <div id="map-notices" aria-label="マップの操作状態">
-        <output id="map-access" aria-label="マップ操作モード"></output>
+      <div id="map-notices" aria-label="編集権限とマップ操作状態">
+        <output id="map-access" aria-label="編集権限と編集状態"></output>
         <output id="interaction-state" role="status"></output>
       </div>
     </div>
@@ -27,6 +27,8 @@
       <button id="redo" type="button" disabled>Redo</button>
       <button id="reload" type="button" data-reload disabled>最新版を読み込む</button>
       <button id="tools-open" type="button" aria-label="メニューを開く">☰<span> メニュー</span></button>
+      <a id="account-notifications" href="./api.php?tab=notifications" hidden>🔔 通知 0</a>
+      <button id="app-update" type="button" hidden>アプリを更新</button>
       <output id="save-state" aria-live="polite">読み込み中</output>
     </div>
   </header>
@@ -70,7 +72,7 @@
           <option value="mountain" hidden>山岳</option>
         </select></label>
         <label>マップ操作<select id="mode">
-          <option value="browse">閲覧 / ドラッグで画面移動（配置・移動なし）</option>
+          <option value="browse">画面移動（施設ドラッグなし）</option>
           <option value="select">選択施設をドラッグで移動 / 空き地は画面移動</option>
           <option value="place">クリックで配置 / ドラッグで画面移動</option>
         </select></label>
@@ -86,7 +88,7 @@
       <section>
         <h2>選択した施設</h2>
         <button id="object-search" type="button"><span aria-hidden="true">🔍</span> 施設を探す</button>
-        <button id="object-clear" type="button">選択解除</button>
+        <button id="object-clear" type="button" title="選択と配置プレビューを解除し、施設ドラッグを画面移動にします。閲覧専用への切り替えではありません。">選択解除</button>
         <p id="selection">マップ上の施設をクリックして選択します。</p>
         <button id="move" type="button" disabled>選択施設を入力座標へ移動</button>
         <button id="delete" class="danger" type="button" disabled>選択施設を削除</button>
@@ -132,7 +134,7 @@
         <button id="zoom-in" type="button" aria-label="拡大">＋</button>
         <button id="zoom-out" type="button" aria-label="縮小">−</button>
         <label class="zoom-control"><input id="zoom-level" type="number" inputmode="numeric" min="2" max="300" step="1" value="100" aria-label="拡大率（パーセント）"><span>%</span></label>
-        <button id="map-browse" type="button">選択解除・閲覧</button>
+        <button id="map-browse" type="button">施設ドラッグを無効化</button>
         <button id="home" type="button">自ギルドへ</button>
         <button id="map-maximize" type="button" aria-pressed="false" aria-label="全体表示" title="全体表示">
           <span>全体表示</span>
@@ -163,7 +165,7 @@
   </div>
   <div id="object-context-menu" class="object-context-menu" role="menu" aria-label="オブジェクトの操作" hidden></div>
   <footer class="app-footer">
-    <span>GitHub : <a href="https://github.com/Benshi/pns-map-editor" target="_blank" rel="noopener noreferrer">P&amp;S Map Editor v1.0.0</a></span>
+    <span>GitHub : <a href="https://github.com/Benshi/pns-map-editor" target="_blank" rel="noopener noreferrer">P&amp;S Map Editor v2.0.0</a></span>
     <span>Copyright © 2026 Orator. All rights reserved.</span>
   </footer>
   <dialog id="tools-dialog" aria-labelledby="tools-dialog-title">
@@ -171,12 +173,17 @@
       <h2 id="tools-dialog-title">メニュー</h2>
       <button class="dialog-close" type="button" data-close="tools-dialog" aria-label="メニューを閉じる">×</button>
     </div>
-    <a href="./api.php" id="account" data-account-link>ログイン・利用者設定</a>
+    <a href="./api.php" id="account" data-account-link>ログイン</a>
+    <p class="hint">閲覧はログイン不要です。編集するにはGoogleログイン後、アカウントの「編集権限」でサーバーごとに申請し、承認を受けてください。</p>
     <p id="save-details" class="hint"></p>
+    <button id="access-mode-toggle" type="button" hidden>閲覧専用モードに切り替え</button>
+    <p class="hint">閲覧専用中も施設の選択・情報確認はできます。編集権限は変更されず、未保存の変更も保持されます。</p>
     <div class="tools-actions">
       <button id="reload-menu" type="button" data-reload disabled>最新版を読み込む</button>
-      <button id="export" type="button">JSON バックアップ</button>
-      <label class="file-button">JSON を読み込み<input id="import" type="file" accept=".json,application/json"></label>
+      <div class="tools-json-actions">
+        <button id="export" type="button">JSON バックアップ</button>
+        <label class="file-button">JSON を読み込み<input id="import" type="file" accept=".json,application/json"></label>
+      </div>
     </div>
     <p class="dialog-status" role="status"></p>
   </dialog>
@@ -185,10 +192,11 @@
       <h2 id="server-dialog-title">マップを開く</h2>
     </div>
     <form id="server-form">
-      <label>共有コード／編集者用サーバー番号<input id="server-number" autocapitalize="off" spellcheck="false" pattern="(?:S)?[0-9]{1,10}|[A-Za-z0-9_\-]{12}" placeholder="共有コード または 1063" required></label>
+      <label>共有コード／編集者用サーバー番号<input id="server-number" autocapitalize="off" spellcheck="false" pattern="(?:S)?[0-9]{1,10}|[A-Za-z0-9_\-]{12}" placeholder="共有コード または サーバー番号" required></label>
       <button type="submit">開く</button>
     </form>
-    <a href="./api.php" data-account-link>ログイン・利用者設定</a>
+    <a href="./api.php" data-account-link>ログイン</a>
+    <p class="hint">共有URLからの閲覧はログイン不要です。編集にはGoogleログイン・表示名登録と、対象サーバーの編集権限の承認が必要です。</p>
     <p class="dialog-status" role="status"></p>
   </dialog>
   <dialog id="guild-dialog" aria-labelledby="guild-dialog-title">
@@ -367,9 +375,9 @@
     <p>次のメンバーを削除します。避難所が配置されている場合は、座標とともに避難所も削除されます。</p>
     <ul id="member-delete-list" class="member-delete-list"></ul>
     <p class="dialog-status" role="status"></p>
-    <div class="inline-controls">
-      <button id="member-delete-confirm" class="danger" type="button">削除する</button>
+    <div class="dialog-actions">
       <button type="button" data-close="member-delete-dialog">キャンセル</button>
+      <button id="member-delete-confirm" class="danger" type="button">削除する</button>
     </div>
   </dialog>
   <dialog id="object-dialog" aria-labelledby="object-dialog-title">
@@ -384,27 +392,5 @@
     <button id="object-more" type="button">さらに100件表示</button>
     <button type="button" data-close="object-dialog">閉じる</button>
   </dialog>
-  <script>
-    const offlineStatus = document.getElementById('offline');
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        offlineStatus.textContent = 'アプリ画面を更新しました。未保存の変更がある場合はJSONで退避してから、ページを再読み込みしてください。';
-      });
-      navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(async registration => {
-        registration.addEventListener('updatefound', () => {
-          offlineStatus.textContent = 'アプリを更新中です。更新後はページを再読み込みしてください。';
-        });
-        await navigator.serviceWorker.ready;
-        if (!registration.installing) {
-          offlineStatus.textContent = 'アプリ画面をキャッシュしました。共有マップの読み込み・保存には通信が必要です。';
-        }
-      }).catch(error => {
-        console.error('Service worker registration failed:', error);
-        offlineStatus.textContent = 'オフライン機能の初期化に失敗しました。通信状態とHTTPS接続を確認してください。';
-      });
-    } else {
-      offlineStatus.textContent = 'このブラウザーではオフライン機能を利用できません。';
-    }
-  </script>
 </body>
 </html>
