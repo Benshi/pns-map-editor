@@ -1,5 +1,5 @@
 import { TYPES, RANKS, shelterColor, rankName, orderedMembers, setMemberRanks, territorySources, territoryRadius, territoryContains, territoryGuilds,
-  LAB, WASTELAND, TURRETS, emptyMap, addGuild, addMembers, renameGuild, renameMember, snapCell, validCell,
+  LAB, WASTELAND, BASE_CELLS, TURRETS, emptyMap, addGuild, addMembers, renameGuild, renameMember, snapCell, validCell,
   footprint, cellKey, terrain, inPolygon, objectAt, placeObject, placementError, importMap, parseMapView, initialMapView,
   territoryBoundary, territorySourceBoundaries, territoryGuildBoundaries, cellBoundary, placedFacility, mapOutline, membersFor, objectGuildId,
   changeMembership, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MIN_SCALE, MAX_SCALE } from './model.js';
@@ -27,7 +27,7 @@ let revision = 0;
 let latestRevision = 0;
 let revisionInfo = null;
 let viewingPast = false;
-let readOnlyMode = false;
+let readOnlyMode = true;
 let loaded = localMode;
 let viewInitialized = false;
 let busy = false;
@@ -35,7 +35,7 @@ let session = { user: null, csrf: '' };
 let preferences = {};
 let guildOrder = 'registration';
 let category = 'mountain';
-let lastNonBrowseMode = 'place';
+let lastNonBrowseMode = 'select';
 const history = new EditHistory(state);
 let selectedId = '';
 let hover = null;
@@ -58,7 +58,7 @@ let edgeLastTime = null;
 let objectResultLimit = 100;
 const searchableObjectTypes = [
   ['fortress', '要塞'], ['outpost', '前哨'], ['shelter', '避難所'],
-  ['resource', '資源'], ['trap', '響罠'], ['warehouse', '倉庫'], ['hospital', '病院'],
+  ['resource', '資源'], ['warehouse', '倉庫'], ['hospital', '病院'], ['trap', '響罠[スピーカートラップ]'],
 ];
 const objectTypeFilters = new Set(searchableObjectTypes.map(([type]) => type));
 let drag = null;
@@ -73,6 +73,13 @@ let width = 0;
 let height = 0;
 let frame = null;
 const view = { x: 256, y: 512, scale: DEFAULT_SCALE };
+const fixedCaptions = [
+  { text: '実験基地', x: 256, y: 511, cells: BASE_CELLS },
+  ...TURRETS.map(([x, y], index) => ({
+    text: ['北部砲台', '西部砲台', '南部砲台', '東部砲台'][index],
+    x, y: y - 1, cells: footprint({ x, y, size: 2 }),
+  })),
+];
 function clampViewCenter() {
   view.x = Math.max(0, Math.min(511, view.x));
   view.y = Math.max(0, Math.min(1023, view.y));
@@ -90,7 +97,8 @@ function setGuildPlacementMode() {
   const current = guild();
   const fortress = state.facilities.find(object => object.type === 'fortress' && object.guildId === current?.id);
   setCategory(!current ? 'mountain' : fortress ? 'shelter' : 'facilities');
-  $('mode').value = 'place';
+  $('mode').value = readOnlyMode ? 'browse' : 'place';
+  lastNonBrowseMode = readOnlyMode ? 'select' : 'place';
   hover = null;
   requestDraw();
 }
@@ -174,10 +182,11 @@ function refreshPersistence() {
   const canEdit = canEditMap() && !readOnlyMode;
   $('map-console').hidden = !canEdit;
   for (const id of ['save', 'undo', 'redo', 'guild-manage', 'member-manage', 'move', 'delete']) $(id).hidden = !canEdit;
+  $('mode-control').hidden = !canEdit;
   $('access-mode-toggle').hidden = !canEditMap();
   $('access-mode-toggle').disabled = busy;
-  $('access-mode-toggle').textContent = readOnlyMode ? '編集モードに戻る' : '閲覧専用モードに切り替え';
-  $('access-mode-toggle').setAttribute('aria-pressed', String(readOnlyMode));
+  $('access-mode-toggle').textContent = readOnlyMode ? '編集モードに切替' : '閲覧モードに切替';
+  $('access-mode-toggle').setAttribute('aria-pressed', String(!readOnlyMode));
   const dirty = history.dirty(state);
   const info = revisionInfo?.saved_at ? ` / ${new Date(revisionInfo.saved_at).toLocaleString()} / ${revisionInfo.author.display_name} · ${revisionInfo.author.id}` : '';
   const mapLabel = serverId ? `${serverId} 第${revision}版` : 'サーバー未指定';
@@ -321,6 +330,7 @@ function refresh() {
   if (!selected()) selectedId = '';
   const object = selected();
   const selection = $('selection');
+  $('selected-object-name').textContent = object ? objectName(object) : '';
   if (object) {
     const name = document.createElement('span');
     name.className = 'selection-object-name';
@@ -641,9 +651,18 @@ for (const type of ['pointercancel', 'lostpointercapture']) {
 }
 
 function renderObjectList() {
+  const guildFilter = $('object-guild-filter');
+  const selectedGuildId = guildFilter.value;
+  guildFilter.replaceChildren(option('', 'すべてのギルド'),
+    ...state.guilds.map(entry => option(entry.id, entry.name)));
+  if (state.guilds.some(entry => entry.id === selectedGuildId)) guildFilter.value = selectedGuildId;
+
+  const title = localMode ? '端末内' : serverId || (serverCode ? '共有マップ' : '未指定サーバー');
+  $('object-dialog-title').textContent = `施設を探す — ${title}`;
   const query = $('object-filter').value.trim().toLocaleLowerCase();
   const matches = state.facilities.filter(object =>
     objectTypeFilters.has(object.type.startsWith('outpost') ? 'outpost' : object.type)
+    && (!guildFilter.value || objectGuildId(state, object) === guildFilter.value)
     && `${objectName(object)} (${object.x},${object.y})`.toLocaleLowerCase().includes(query));
   $('object-count').textContent = `${matches.length}件中 ${Math.min(matches.length, objectResultLimit)}件表示`;
   $('object-more').disabled = matches.length <= objectResultLimit;
@@ -1370,6 +1389,7 @@ $('map-browse').addEventListener('click', () => {
 });
 for (const [type, name] of searchableObjectTypes) {
   const label = document.createElement('label');
+  label.classList.add(`object-type-filter-${type}`);
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.checked = true;
@@ -1393,6 +1413,10 @@ $('object-search').addEventListener('click', () => {
   $('object-dialog').showModal();
 });
 $('object-filter').addEventListener('input', () => {
+  objectResultLimit = 100;
+  renderObjectList();
+});
+$('object-guild-filter').addEventListener('change', () => {
   objectResultLimit = 100;
   renderObjectList();
 });
@@ -1629,7 +1653,7 @@ async function initializeStorage() {
       $('guild').value = target?.id ?? '';
       refresh();
       setGuildPlacementMode();
-      if (!target) status(`URLで指定したギルド「${link.guild}」が見つかりません。${link.x === null ? '中央基地' : '指定座標'}を表示します。`, true);
+      if (!target) status(`URLで指定したギルド「${link.guild}」が見つかりません。${link.x === null ? '実験基地' : '指定座標'}を表示します。`, true);
     }
     Object.assign(view, initialMapView(state, link.guild, link.scale, link.x, link.y));
     clampViewCenter();
@@ -1771,6 +1795,29 @@ function diamond(x, y, fill, stroke = null, lineWidth = 1, inset = 0) {
   context.closePath();
   if (fill) { context.fillStyle = fill; context.fill(); }
   if (stroke) { context.strokeStyle = stroke; context.lineWidth = lineWidth; context.stroke(); }
+}
+function drawFixedCells(cells) {
+  context.beginPath();
+  for (const cell of cells) {
+    const p = screen(cell.x, cell.y);
+    context.moveTo(p.x, p.y - view.scale);
+    context.lineTo(p.x + view.scale, p.y);
+    context.lineTo(p.x, p.y + view.scale);
+    context.lineTo(p.x - view.scale, p.y);
+    context.closePath();
+  }
+  context.fillStyle = '#d9a65b';
+  context.fill();
+  context.beginPath();
+  for (const [[ax, ay], [bx, by]] of cellBoundary(cells)) {
+    const a = screen(ax, ay);
+    const b = screen(bx, by);
+    context.moveTo(a.x, a.y);
+    context.lineTo(b.x, b.y);
+  }
+  context.strokeStyle = '#42351f';
+  context.lineWidth = .8;
+  context.stroke();
 }
 function objectDiamond(object, fill, stroke = null, lineWidth = 1, inset = 0) {
   if (object.type === 'mountain' && footprint(object).length < 4) {
@@ -1973,10 +2020,9 @@ function draw() {
     }
   }
   for (const [x, y] of TURRETS) {
-    for (const cell of footprint({ x, y, size: 2 })) {
-      diamond(cell.x, cell.y, '#d9a65b', '#42351f', .8);
-    }
+    drawFixedCells(footprint({ x, y, size: 2 }));
   }
+  drawFixedCells(BASE_CELLS);
   const mountainCells = new Set(state.mountains.flatMap(footprint).map(cellKey));
   const territories = new Map();
   const placement = placementPreview();
@@ -2063,6 +2109,13 @@ function draw() {
     context.stroke();
   }
   context.restore();
+  if (matchMedia('(hover: hover) and (pointer: fine)').matches && hover) {
+    context.save();
+    context.shadowColor = '#fff2b8cc';
+    context.shadowBlur = Math.min(12, view.scale * .45);
+    diamond(hover.x, hover.y, '#fff2b866');
+    context.restore();
+  }
   const detachedIds = new Set(sources.detached.map(object => object.id));
   const labels = [];
   for (const object of objects()) {
@@ -2115,6 +2168,11 @@ function draw() {
     if (view.scale >= 5) labels.push(object);
   }
   for (const object of labels.filter(object => object.id !== selectedId)) drawObjectLabel(object);
+  if (view.scale >= 5) {
+    for (const { text, x, y } of fixedCaptions) {
+      if (visible(x, y)) drawMapCaption(text, screen(x, y));
+    }
+  }
   if (view.scale >= 10) {
     context.font = '10px system-ui';
     context.textAlign = 'center';
@@ -2159,6 +2217,19 @@ function draw() {
     context.stroke();
   }
   const selectedLabel = selected();
+  const desktopHover = matchMedia('(hover: hover) and (pointer: fine)').matches;
+  for (const object of labels.filter(object => object.type === 'fortress' && object.id !== selectedId)) {
+    drawObjectLabel(object, false, true);
+  }
+  if (!selectedLabel && desktopHover && hover) {
+    const hoveredObject = objectAt(state, hover.x, hover.y);
+    if (hoveredObject && footprint(hoveredObject).some(cell => visible(cell.x, cell.y))) {
+      drawObjectLabel(hoveredObject, false, true);
+    } else {
+      const fixed = fixedCaptions.find(caption => caption.cells.some(cell => cell.x === hover.x && cell.y === hover.y));
+      if (fixed) drawMapCaption(fixed.text, screen(fixed.x, fixed.y), true);
+    }
+  }
   if (selectedLabel && footprint(selectedLabel).some(cell => visible(cell.x, cell.y))) drawObjectLabel(selectedLabel, true);
   context.restore();
 }
@@ -2201,7 +2272,7 @@ function drawTerritoryBoundary(edges, color, lineWidth) {
   context.restore();
 }
 
-function drawObjectLabel(object, highlight = false) {
+function drawObjectLabel(object, highlight = false, prominent = false) {
     const cells = footprint(object);
     const p = object.type === 'mountain'
       ? screen(cells.reduce((sum, cell) => sum + cell.x, 0) / cells.length,
@@ -2219,19 +2290,36 @@ function drawObjectLabel(object, highlight = false) {
     context.textBaseline = 'middle';
     context.lineWidth = 3;
     context.strokeStyle = '#15211a';
-    if (highlight) {
-      context.fillStyle = '#14251df2';
+    if (highlight || prominent) {
+      context.fillStyle = highlight ? '#14251df2' : '#14251df0';
       const size = context.measureText(text);
       context.fillRect(p.x - size.width / 2 - 5, p.y - 11, size.width + 10, 22);
     }
     context.strokeText(text, p.x, p.y);
-    context.fillStyle = highlight ? '#ffb8ed' : object.type === 'shelter'
+    context.fillStyle = highlight ? '#ffb8ed' : prominent ? '#ffe69b' : object.type === 'shelter'
       ? !owner ? '#f5f5f5' : own ? '#69d5ff' : '#ffe16b' : '#fff';
     context.fillText(text, p.x, p.y);
 }
 
+function drawMapCaption(text, position, highlight = false) {
+  context.font = `${Math.max(10, Math.min(15, view.scale))}px system-ui`;
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.lineWidth = 3;
+  context.strokeStyle = '#15211a';
+  if (highlight) {
+    context.fillStyle = '#14251df0';
+    const size = context.measureText(text);
+    context.fillRect(position.x - size.width / 2 - 5, position.y - 11, size.width + 10, 22);
+  }
+  context.strokeText(text, position.x, position.y);
+  context.fillStyle = '#fff';
+  if (highlight) context.fillStyle = '#ffe69b';
+  context.fillText(text, position.x, position.y);
+}
+
 function placementPreview() {
-  if (maximized) return null;
+  if (maximized || $('mode').value === 'browse') return null;
   const moving = drag?.object && drag.moved;
   if ((!moving && !placementPreviewActive) || !editable() || (category === 'facilities' && !guild())
     || (category === 'shelter' && !canPlaceShelter())) return null;
@@ -2431,8 +2519,59 @@ function stepZoom(direction, point, anchorOutsideToMapCorner = false) {
     : (Math.ceil((percent - .00001) / 10) - 1) * 10;
   zoom(Math.max(MIN_SCALE, next / 100 * DEFAULT_SCALE) / view.scale, point, anchorOutsideToMapCorner);
 }
-$('zoom-in').addEventListener('click', () => stepZoom(1));
-$('zoom-out').addEventListener('click', () => stepZoom(-1));
+let zoomHold = null;
+let suppressZoomClick = false;
+function stopZoomHold() {
+  if (!zoomHold) return;
+  clearTimeout(zoomHold.timer);
+  zoomHold = null;
+}
+function repeatZoom(hold, startedAt) {
+  if (zoomHold !== hold) return;
+  stepZoom(hold.direction);
+  const elapsed = Date.now() - startedAt;
+  const interval = Math.max(45, 150 - Math.floor(elapsed / 700) * 20);
+  hold.timer = setTimeout(() => repeatZoom(hold, startedAt), interval);
+}
+function bindZoomButton(button, direction) {
+  button.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    if (document.activeElement === $('zoom-level')) $('zoom-level').blur();
+    event.preventDefault();
+    stopZoomHold();
+    suppressZoomClick = true;
+    const startedAt = Date.now();
+    const hold = { direction, pointerId: event.pointerId, timer: null };
+    zoomHold = hold;
+    stepZoom(direction);
+    hold.timer = setTimeout(() => repeatZoom(hold, startedAt), 350);
+    if (button.setPointerCapture) button.setPointerCapture(event.pointerId);
+  });
+  button.addEventListener('click', event => {
+    if (suppressZoomClick) {
+      event.preventDefault();
+      suppressZoomClick = false;
+      return;
+    }
+    stepZoom(direction);
+  });
+}
+bindZoomButton($('zoom-in'), 1);
+bindZoomButton($('zoom-out'), -1);
+window.addEventListener('pointerup', event => {
+  if (zoomHold && zoomHold.pointerId !== event.pointerId) return;
+  stopZoomHold();
+  setTimeout(() => { suppressZoomClick = false; }, 0);
+});
+window.addEventListener('pointercancel', event => {
+  if (zoomHold && zoomHold.pointerId !== event.pointerId) return;
+  stopZoomHold();
+  setTimeout(() => { suppressZoomClick = false; }, 0);
+});
+window.addEventListener('blur', () => {
+  stopZoomHold();
+  suppressZoomClick = false;
+});
 $('zoom-level').addEventListener('input', () => {
   const input = $('zoom-level');
   input.setCustomValidity('');
@@ -2462,11 +2601,16 @@ $('access-mode-toggle').addEventListener('click', () => {
   if (!canEditMap() || busy) return;
   readOnlyMode = !readOnlyMode;
   if (readOnlyMode) enterBrowseMode();
-  else refreshPersistence();
-  $('tools-dialog').close();
+  else {
+    $('mode').value = 'browse';
+    placementPreviewActive = false;
+    relocationPreviewActive = false;
+    refreshPersistence();
+  }
+  requestDraw();
   status(readOnlyMode
     ? '閲覧専用に切り替えました。未保存の変更は保持されています。'
-    : '編集モードに戻りました。マップ操作を選んで編集できます。');
+    : '編集モードに戻りました。必要なマップ操作を選んで編集できます。');
 });
 $('console-drawer-toggle').addEventListener('click', event => {
   const button = event.currentTarget;

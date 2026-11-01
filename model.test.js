@@ -5,7 +5,7 @@ import { emptyMap, addGuild, addMember, snapCell, validCell, footprint, terrain,
   objectAt, placeObject, placementError, territoryGuilds, importMap,
   addMembers, renameMember, renameGuild, orderedMembers, setMemberRank, setMemberRanks, territorySources,
   territoryContains, territoryBoundary, territorySourceBoundaries, territoryGuildBoundaries, cellBoundary, placedFacility, mapOutline, shelterColor, SHELTER_RANK_COLORS,
-  TYPES, WASTELAND, BASE, TURRETS, parseMapView, initialMapView, membersFor,
+  TYPES, WASTELAND, BASE, BASE_CELLS, TURRETS, parseMapView, initialMapView, membersFor,
   changeMembership, objectGuildId, deleteGuild, reorderMember, edgeVelocity, DEFAULT_SCALE, MAX_SCALE } from './model.js';
 
 test('map outline is one closed jagged boundary around the valid parity grid', () => {
@@ -325,7 +325,13 @@ test('updated wasteland and fixed facility coordinates match specified vertices'
     assert.equal(Math.abs(nextX - x), Math.abs(nextY - y));
   }
   for (const [x, y] of WASTELAND) assert.equal(terrain(x, y), 'wasteland');
-  assert.deepEqual(BASE, [[254,512],[256,514],[258,512],[256,508]]);
+  assert.deepEqual(BASE, [[253,511],[256,508],[259,511],[256,514]]);
+  assert.deepEqual(BASE_CELLS.map(({ x, y }) => `${x},${y}`), [
+    '253,511', '254,510', '254,512', '255,509', '255,511', '255,513',
+    '256,508', '256,510', '256,512', '256,514',
+    '257,509', '257,511', '257,513', '258,510', '258,512', '259,511',
+  ]);
+  assert.ok(BASE_CELLS.every(({ x, y }) => validCell(x, y)));
   assert.deepEqual(TURRETS, [[256,502],[246,512],[256,522],[266,512]]);
 });
 
