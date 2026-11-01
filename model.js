@@ -106,7 +106,7 @@ export function setMemberRanks(state, guildId, memberIds, rank) {
 
 export const LAB = [[244, 512], [256, 524], [268, 512], [256, 500]];
 export const WASTELAND = [[217, 511], [256, 472], [295, 511], [256, 550]];
-export const BASE = [[254, 512], [256, 514], [258, 512], [256, 508]];
+export const BASE = [[253, 511], [256, 508], [259, 511], [256, 514]];
 export const TURRETS = [[256, 502], [246, 512], [256, 522], [266, 512]];
 
 export function parseMapView(search) {
@@ -275,6 +275,11 @@ export function terrain(x, y) {
   if (inPolygon(x, y, LAB)) return 'lab';
   return inPolygon(x, y, WASTELAND) ? 'wasteland' : 'grass';
 }
+
+export const BASE_CELLS = Object.freeze(Array.from({ length: 7 }, (_, x) => x + 253)
+  .flatMap(x => Array.from({ length: 7 }, (_, y) => y + 508)
+    .filter(y => validCell(x, y) && inPolygon(x, y, BASE))
+    .map(y => Object.freeze({ x, y }))));
 
 export function emptyMap() {
   return { version: 2, ownGuildId: null, guilds: [], players: [], facilities: [], mountains: [] };
